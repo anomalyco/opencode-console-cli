@@ -1,0 +1,50 @@
+name: Promotion PR
+
+on:
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: promotion-pr
+  cancel-in-progress: false
+
+jobs:
+  promotion:
+    name: Open draft promotion PR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Ensure dev to production PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          pr="$(gh pr list --base production --head dev --state open --json url --jq '.[0].url // empty')"
+          if [[ -n "$pr" ]]; then
+            echo "Promotion PR already open: $pr"
+            exit 0
+          fi
+
+          changes="$(gh api "repos/$GH_REPO/compare/production...dev" --jq '.ahead_by > 0 and (.files | length > 0)')"
+          if [[ "$changes" != "true" ]]; then
+            echo "No changes to promote."
+            exit 0
+          fi
+
+          gh pr create \
+            --base production \
+            --head dev \
+            --draft \
+            --title "chore(release): promote dev to production" \
+            --body "Promote the latest changes from dev to production.
+
+          Checks come from CI's run on dev's newest commit, which is this PR's head. Merge with a merge commit, never a squash, so production keeps dev's history.
+
+          New commits on dev automatically join this PR."

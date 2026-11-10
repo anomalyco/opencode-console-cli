@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-console-cli",
+  "version": "0.1.9",
+  "private": true,
+  "type": "module",
+  "packageManager": "bun@1.4.3",
+  "scripts": {
+    "build": "bun run script/build.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint --type-aware --deny-warnings .",
+    "fmt": "oxfmt 'src/**/*.ts' 'test/**/*.ts' 'script/**/*.ts'",
+    "fmt:check": "oxfmt --check 'src/**/*.ts' 'test/**/*.ts' 'script/**/*.ts'",
+    "test": "bun test --timeout 30000",
+    "check": "bun run fmt:check && bun run lint && bun run typecheck"
+  },
+  "dependencies": {
+    "@opencode/core": "0.0.0-dev-831",
+    "@opencode/schema": "0.0.0-dev-831",
+    "@opencode/util": "0.0.0-dev-831",
+    "effect": "4.1.2",
+    "smol-toml": "1.9.1",
+    "yaml": "2.9.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@effect/language-service": "0.87.5",
+    "@types/bun": "1.4.3",
+    "oxfmt": "0.48.0",
+    "oxlint": "1.78.0",
+    "oxlint-tsgolint": "7.0.2005",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@ai-sdk/provider-utils": "4.0.33",
+    "@effect/opentelemetry": "4.1.2",
+    "@effect/platform-node": "4.1.2",
+    "@effect/platform-node-shared": "4.1.2",
+    "effect": "4.1.2",
+    "protobufjs": "7.6.6",
+    "tinypool": "2.1.2"
+  }
+}

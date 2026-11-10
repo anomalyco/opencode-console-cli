@@ -1,0 +1,245 @@
+#!/bin/sh
+# Installs the OpenCode Console CLI without Node: downloads the opencode-console binary for this computer from Anomaly's
+# release service, checks its size, SHA-256 and signature, runs its self-test, then hands over to it. Its `setup`
+# installs it where agents run it, connects the agent and keeps it up to date. Served at https://opencode.ai/console/install;
+# `npx @opencode/console setup <agent>` does the same with Node. Ported from anomalyco/browse's install (2b6194cf).
+#
+#   curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code
+set -eu
+
+RED='\033[0;31m'
+MUTED='\033[0;2m'
+NC='\033[0m'
+
+usage() {
+    cat <<EOF
+OpenCode Console CLI installer
+
+Usage: install [options] setup <claude-code|pi|codex|deepseek-harness|hermes> [setup options]
+
+Options:
+    -h, --help              Display this help message
+    -v, --version <version> Install a specific version from npm (e.g., 0.1.9)
+        --channel <channel> Install the current release on a channel: stable (default), beta or dev
+
+Everything after the options goes to opencode-console, e.g. setup claude-code --keep-provider.
+
+Examples:
+    curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code
+    curl -fsSL https://opencode.ai/console/install | sh -s -- --channel dev setup codex
+    curl -fsSL https://opencode.ai/console/install | sh -s -- --version 0.1.9 setup pi
+
+OPENCODE_CONSOLE_VERSION sets --version, OPENCODE_CONSOLE_RELEASE_SERVICE the release service.
+EOF
+}
+
+fail() {
+    printf '%b\n' "${RED}opencode-console: $*${NC}" >&2
+    exit 1
+}
+
+# Anomaly's release key for Linux binaries (.github/release/linux-signing.pub) and the code-signing requirement for
+# macOS ones (.github/release/macos-requirement.txt); a test keeps these the same as those files.
+LINUX_SIGNING_KEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAppH4owNdPd5Ktoj4LvYkz88BeykCWNB9mbZWveLvWt8=
+-----END PUBLIC KEY-----'
+MACOS_REQUIREMENT='anchor apple generic and identifier "anomaly.opencode-console" and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "5NZ4Q7NXJ4" and notarized'
+
+# field <key> <json>: the first value of <key> in <json>, which has no whitespace.
+field() {
+    case "$2" in
+        *"\"$1\":"*) printf '%s' "${2#*\""$1"\":}" | sed -e 's/^"//' -e 's/[",}].*//' ;;
+    esac
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d ' ' -f 1
+    else fail "sha256sum or shasum is required to check the download"; fi
+}
+
+sha512_file() {
+    if command -v sha512sum >/dev/null 2>&1; then sha512sum <"$1" | cut -d ' ' -f 1
+    elif command -v shasum >/dev/null 2>&1; then shasum -a 512 <"$1" | cut -d ' ' -f 1
+    elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha512 <"$1" | sed 's/^.*= *//'
+    else fail "sha512sum, shasum or openssl is required to check the download"; fi
+}
+
+# base64_hex <base64>: lowercase hex, or nothing when it isn't base64. GNU and busybox base64 take -d; macOS -D.
+base64_hex() {
+    case "$1" in "" | *[!A-Za-z0-9+/=]*) return 0 ;; esac
+    if printf 'Zg==' | base64 -d >/dev/null 2>&1; then printf '%s' "$1" | base64 -d 2>/dev/null | od -A n -v -t x1 | tr -d ' \t\r\n'
+    elif printf 'Zg==' | base64 -D >/dev/null 2>&1; then printf '%s' "$1" | base64 -D 2>/dev/null | od -A n -v -t x1 | tr -d ' \t\r\n'
+    elif command -v openssl >/dev/null 2>&1; then printf '%s' "$1" | openssl base64 -d -A 2>/dev/null | od -A n -v -t x1 | tr -d ' \t\r\n'
+    fi
+}
+
+version=${OPENCODE_CONSOLE_VERSION:-}
+channel=stable
+remaining=$#
+while [ "$remaining" -gt 0 ]; do
+    remaining=$((remaining - 1))
+    case "$1" in
+        -h | --help) usage; exit 0 ;;
+        -v | --version)
+            [ "$remaining" -gt 0 ] || fail "--version requires a version"
+            version=$2; remaining=$((remaining - 1)); shift 2 ;;
+        --channel)
+            [ "$remaining" -gt 0 ] || fail "--channel requires a channel"
+            channel=$2; remaining=$((remaining - 1)); shift 2 ;;
+        *) set -- "$@" "$1"; shift ;;
+    esac
+done
+case "$channel" in
+    latest) channel=stable ;;
+    stable | beta | dev) ;;
+    *) fail "unknown channel $channel (stable, beta or dev)" ;;
+esac
+version=${version#v}
+if [ -n "$version" ]; then
+    printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-(dev|beta)\.[0-9]+(\.[0-9]+)?)?$' || fail "$version isn't a release version"
+    # A pinned version's own channel decides its checks, whatever --channel said.
+    case "$version" in *-dev.*) channel=dev ;; *-beta.*) channel=beta ;; *) channel=stable ;; esac
+fi
+
+# Anomaly's release service, or for a dev build a stand-in on this computer.
+service=${OPENCODE_CONSOLE_RELEASE_SERVICE:-https://anoma.ly/release}
+service=${service%/}
+case "$service" in
+    https://anoma.ly/release) ;;
+    http://127.0.0.1:*/release | http://localhost:*/release)
+        [ "$channel" = dev ] || fail "a release service on this computer serves dev builds only" ;;
+    *) fail "OPENCODE_CONSOLE_RELEASE_SERVICE must be https://anoma.ly/release, not $service" ;;
+esac
+origin=${service%/release}
+
+raw_os=$(uname -s)
+case "$raw_os" in
+    Darwin*) os=darwin ;;
+    Linux*) os=linux ;;
+    MINGW* | MSYS* | CYGWIN*) fail "on Windows, run in PowerShell: & ([scriptblock]::Create((irm https://opencode.ai/console/install.ps1))) setup <agent>" ;;
+    *) fail "no binary for $raw_os; run npx @opencode/console setup <agent> with Node instead" ;;
+esac
+arch=$(uname -m)
+case "$arch" in
+    aarch64 | arm64) arch=arm64 ;;
+    x86_64 | amd64) arch=x64 ;;
+    *) fail "no binary for $os/$arch; run npx @opencode/console setup <agent> with Node instead" ;;
+esac
+# An Intel shell under Rosetta on an Apple silicon Mac runs the ARM build.
+if [ "$os" = darwin ] && [ "$arch" = x64 ] && [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0)" = 1 ]; then
+    arch=arm64
+fi
+target="$os-$arch"
+if [ "$arch" = x64 ]; then
+    if [ "$os" = linux ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then target="$target-baseline"; fi
+    if [ "$os" = darwin ] && [ "$(sysctl -n hw.optional.avx2_0 2>/dev/null || echo 0)" != 1 ]; then target="$target-baseline"; fi
+fi
+if [ "$os" = linux ] && { [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; }; then target="$target-musl"; fi
+case "$target" in darwin-*) service_target="macos-${target#darwin-}" ;; *) service_target=$target ;; esac
+
+command -v tar >/dev/null 2>&1 || fail "tar is required"
+tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/opencode-console-install.XXXXXX")
+trap 'rm -rf "$tmp_dir"' EXIT
+archive="$tmp_dir/opencode-console.tgz"
+release_sha=""
+
+if [ -n "$version" ]; then
+    # A pinned version comes from npm: the release service serves one current release per channel.
+    package="@opencode/console-$target"
+    status=$(curl -s -o "$tmp_dir/metadata.json" -w "%{http_code}" "https://registry.npmjs.org/@opencode%2fconsole-$target/$version" || true)
+    [ "$status" = 200 ] || fail "$package@$version isn't on npm (it answered $status)"
+    metadata=$(tr -d ' \t\r\n' <"$tmp_dir/metadata.json")
+    dist="${metadata#*\"dist\":\{}"
+    integrity=$(field integrity "$dist")
+    tarball=$(field tarball "$dist")
+    case "$tarball" in https://registry.npmjs.org/*) ;; *) fail "$package@$version's tarball isn't on registry.npmjs.org" ;; esac
+    case "$integrity" in sha512-*) ;; *) fail "$package@$version has no SHA-512 integrity; nothing was installed" ;; esac
+    expected=$(base64_hex "${integrity#sha512-}")
+    [ "${#expected}" -eq 128 ] || fail "$package@$version has an invalid SHA-512 integrity; nothing was installed"
+    printf '%b\n' "${MUTED}Downloading ${NC}opencode-console $version ${MUTED}($target, from npm)${NC}"
+    curl -fsSL -o "$archive" "$tarball" ||
+        fail "couldn't download $package@$version"
+    [ "$(sha512_file "$archive")" = "$expected" ] || fail "checksum mismatch for $package@$version; nothing was installed"
+else
+    # The channel's current release, as the release service's manifest names it: its size and SHA-256 must match.
+    curl -fsSL -A "opencode-console/$channel/install" -o "$tmp_dir/manifest.json" "$service/opencode-console/cli/$channel.json" ||
+        fail "no $channel release at $service/opencode-console/cli/$channel.json"
+    manifest=$(tr -d ' \t\r\n' <"$tmp_dir/manifest.json")
+    if [ "$(field app "$manifest")" != opencode-console ] || [ "$(field artifact "$manifest")" != cli ] ||
+        [ "$(field channel "$manifest")" != "$channel" ]; then
+        fail "$service/opencode-console/cli/$channel.json isn't the CLI's $channel manifest"
+    fi
+    release_json="${manifest#*\"release\":}"
+    version=$(field version "$release_json")
+    [ -n "$version" ] || fail "the $channel release has no version"
+    targets="${release_json#*\"targets\":}"
+    target_json="${targets#*\""$service_target"\":\{}"
+    [ "$target_json" != "$targets" ] || fail "the $channel release has no $service_target build; run npx @opencode/console setup <agent> instead"
+    target_json="${target_json%%\}*}"
+    url=$(field url "$target_json")
+    release_sha=$(field sha256 "$target_json")
+    size=$(field size "$target_json")
+    case "$url" in /[!/]*) url="$origin$url" ;; *) fail "unexpected download URL $url" ;; esac
+    printf '%b\n' "${MUTED}Downloading ${NC}opencode-console $version ${MUTED}($target, $channel)${NC}"
+    curl -fsSL -A "opencode-console/$channel/$version/cli" -o "$archive" "$url" || fail "couldn't download $url"
+    [ "$(sha256_file "$archive")" = "$release_sha" ] || fail "checksum mismatch for ${url##*/}; nothing was installed"
+    [ "$(wc -c <"$archive" | tr -d ' ')" = "$size" ] || fail "size mismatch for ${url##*/}; nothing was installed"
+fi
+
+# Only the binary and its signature: nothing else from the archive lands beside it.
+tar -xzf "$archive" -C "$tmp_dir" package/bin/opencode-console 2>/dev/null || fail "the download has no package/bin/opencode-console"
+tar -xzf "$archive" -C "$tmp_dir" package/bin/opencode-console.sig 2>/dev/null || true
+binary="$tmp_dir/package/bin/opencode-console"
+{ [ -f "$binary" ] && [ ! -L "$binary" ]; } || fail "the download's package/bin/opencode-console isn't a file"
+
+# linux_signed: whether any 64-byte signature in the .sig is the release key's (a release during a key rotation
+# carries the old key's and the new one's).
+linux_signed() {
+    printf '%s\n' "$LINUX_SIGNING_KEY" >"$tmp_dir/key.pem"
+    printf 'anomaly.opencode-console.linux-artifact.v1\n%s\n' "$(sha256_file "$binary")" >"$tmp_dir/message"
+    size=$(wc -c <"$binary.sig" | tr -d ' ')
+    [ "$size" -gt 0 ] && [ $((size % 64)) -eq 0 ] && [ "$size" -le 256 ] || return 1
+    part=0
+    while [ $((part * 64)) -lt "$size" ]; do
+        dd if="$binary.sig" of="$tmp_dir/part.sig" bs=64 skip="$part" count=1 2>/dev/null
+        openssl pkeyutl -verify -rawin -pubin -inkey "$tmp_dir/key.pem" -in "$tmp_dir/message" -sigfile "$tmp_dir/part.sig" >/dev/null 2>&1 && return 0
+        part=$((part + 1))
+    done
+    return 1
+}
+# OpenSSL 3 checks ed25519 (-rawin); LibreSSL and older OpenSSL can't.
+openssl_ed25519() {
+    command -v openssl >/dev/null 2>&1 && openssl pkeyutl -help 2>&1 | grep -q -- -rawin
+}
+
+# Before anything from the download runs. Dev builds aren't signed, but a signature one carries must hold.
+if [ "$os" = darwin ] && [ "$channel" != dev ]; then
+    /usr/bin/codesign --verify --strict "-R=$MACOS_REQUIREMENT" "$binary" 2>/dev/null ||
+        fail "opencode-console $version isn't signed and notarized by Anomaly; nothing was installed"
+elif [ "$os" = linux ]; then
+    if [ -f "$binary.sig" ] && openssl_ed25519; then
+        linux_signed || fail "opencode-console $version's signature isn't Anomaly's release key's; nothing was installed"
+    elif [ "$channel" != dev ]; then
+        [ -f "$binary.sig" ] || fail "opencode-console $version isn't signed by Anomaly's release key; nothing was installed"
+        fail "checking opencode-console's signature needs OpenSSL 3 (openssl pkeyutl -rawin); install it, or run npx @opencode/console setup <agent> instead"
+    fi
+fi
+chmod 755 "$binary"
+"$binary" self-test >/dev/null || fail "opencode-console $version failed its self-test on this computer; nothing was installed"
+
+if [ $# -eq 0 ]; then
+    printf '%b\n' "opencode-console $version checks out. Run the installer again with the agent to connect:"
+    printf '%b\n' "${MUTED}  curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code${NC}"
+    exit 0
+fi
+# The release archive setup's receipt names, which the release service tells builds apart by.
+if [ -n "$release_sha" ]; then export OPENCODE_CONSOLE_RELEASE_SHA256="$release_sha"; fi
+status=0
+# `curl | sh` feeds this script through stdin, so setup gets the terminal for its sign-in.
+if [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
+    "$binary" "$@" </dev/tty || status=$?
+else
+    "$binary" "$@" || status=$?
+fi
+exit "$status"

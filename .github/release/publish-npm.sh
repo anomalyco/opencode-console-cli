@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# publish-npm.sh <build dir> <binaries dir> [<signed dir>...]: publishes the platform packages @opencode/console-<target>
+# (opencode-console-<target>-<version>.tgz: package/bin/opencode-console, and its .sig on Linux), then
+# opencode-console-<version>.tgz (@opencode/console, the npx package), all with CONSOLE_NPM_TAG. Names, the version and
+# the package set come from this script and the environment, never from the tarballs: each package.json is read as data
+# and must match. Lifecycle scripts never run (--ignore-scripts). npm authenticates with trusted publishing (OIDC) in
+# environment npm (production only); there is no token. Every real publish carries --provenance, which npm accepts only
+# from a public repository whose URL matches package.json's; a dry run has no OIDC token, so it leaves it out. Ported
+# from anomalyco/browse (publish-npm.sh, 2b6194cf).
+. "$(dirname "$0")/lib.sh"
+
+build_dir=$1 binaries_dir=$2
+shift 2
+signed=("$@")
+[ -n "${CONSOLE_NPM_TAG:-}" ] || die "No npm dist-tag for channel ${CONSOLE_CHANNEL:-?}; dev builds aren't published to npm"
+
+check_package() { # <file> <name> [<os> <cpu> <libc or "">]
+  local file=$1 name=$2 packed_name packed_version config scripts os cpu libc
+  test -s "$file" || die "Missing $file"
+  IFS=$'\t' read -r packed_name packed_version config scripts os cpu libc < <(tar -xzOf "$file" package/package.json |
+    jq -r '[.name, .version, ((.publishConfig // {}) | keys - ["access"] | length > 0),
+      ((.scripts // {}) | (has("preinstall") or has("install") or has("postinstall") or has("prepare"))),
+      ((.os // []) | join(",")), ((.cpu // []) | join(",")), ((.libc // []) | join(","))] | @tsv')
+  [ "$packed_name" = "$name" ] || die "$file is $packed_name, expected $name"
+  [ "$packed_version" = "$CONSOLE_VERSION" ] || die "$file has version $packed_version, expected $CONSOLE_VERSION"
+  [ "$config" = false ] || die "$file sets publishConfig beyond access"
+  [ "$scripts" = false ] || die "$file has an install script"
+  if [ $# -eq 2 ]; then return; fi
+  [ "$os,$cpu,$libc" = "$3,$4,$5" ] || die "$file is for os $os cpu $cpu libc $libc, expected $3 $4 $5"
+}
+
+list=$(mktemp)
+for target in $TARGETS; do
+  IFS=- read -r os arch _ <<< "$target"
+  executable=opencode-console libc=""
+  case $os in
+    windows) os=win32 executable=opencode-console.exe ;;
+    linux) libc=glibc ;;
+  esac
+  if [[ "$target" == *-musl ]]; then libc=musl; fi
+  file=$(target_file "$target" "$binaries_dir" "${signed[@]}")
+  check_package "$file" "@opencode/console-$target" "$os" "$arch" "$libc"
+  # Exactly the binary (executable), package.json and LICENSE, and a Linux binary's signature.
+  entries=$(tar -tvzf "$file" | awk '{print $1, $NF}' | LC_ALL=C sort)
+  expected=$(printf '%s\n' "-rw-r--r-- package/LICENSE" "-rw-r--r-- package/package.json" "-rwxr-xr-x package/bin/$executable" | LC_ALL=C sort)
+  # Every run that reaches npm signed its Linux binaries (a check run with a throwaway key).
+  if [ "$os" = linux ]; then
+    expected=$(printf '%s\n%s\n' "$expected" "-rw-r--r-- package/bin/opencode-console.sig" | LC_ALL=C sort)
+  fi
+  [ "$entries" = "$expected" ] || die "$file holds $entries"
+  printf '%s\t%s\n' "@opencode/console-$target" "$file" >> "$list"
+done
+# @opencode/console goes last, once every binary of its version is on npm.
+file="$build_dir/opencode-console-$CONSOLE_VERSION.tgz"
+check_package "$file" @opencode/console
+printf '%s\t%s\n' @opencode/console "$file" >> "$list"
+
+# A clean directory and config, so nothing from an artifact can redirect the registry.
+printf 'registry=https://registry.npmjs.org/\n' > "$RUNNER_TEMP/npmrc"
+export NPM_CONFIG_USERCONFIG="$RUNNER_TEMP/npmrc"
+cd "$(mktemp -d)" || exit
+
+flags=(--tag "$CONSOLE_NPM_TAG" --access public --ignore-scripts)
+if dry_run; then flags+=(--dry-run); else flags+=(--provenance); fi
+while IFS=$'\t' read -r name file; do
+  # npm refuses a version it has, dry run or not. A rerun skips what it already published, but never different bytes
+  # under the same version; a check run says so instead of stopping, since a release would bump the version first.
+  published=$(npm view "$name@$CONSOLE_VERSION" dist.integrity 2> /dev/null || true)
+  if [ -n "$published" ]; then
+    if [ "$published" != "sha512-$(openssl dgst -sha512 -binary "$file" | openssl base64 -A)" ]; then
+      message="$name@$CONSOLE_VERSION is on npm with other bytes ($published). Rerun the failed jobs of the original run, or bump the version."
+      if ! dry_run; then die "$message"; fi
+      echo "::warning::$message"
+      summary "Would fail: $message"
+      continue
+    fi
+    summary "$name@$CONSOLE_VERSION is already on npm; nothing to publish."
+    continue
+  fi
+  npm publish "$file" "${flags[@]}"
+  summary "$(dry_run && echo "Would publish" || echo "Published") $name@$CONSOLE_VERSION with dist-tag $CONSOLE_NPM_TAG."
+done < "$list"

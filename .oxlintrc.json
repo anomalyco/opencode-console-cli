@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": ["dist/**", "dist-bin/**", ".cache/**"],
+  "plugins": ["typescript", "unicorn", "oxc", "import"],
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "typescript/consistent-type-imports": ["error", { "fixStyle": "inline-type-imports" }],
+    "typescript/no-explicit-any": "error",
+    "typescript/no-require-imports": "error",
+    "import/no-namespace": "error",
+    "typescript/no-unsafe-function-type": "error",
+    "typescript/no-unsafe-type-assertion": "error",
+    "import/no-commonjs": "error",
+    "import/no-default-export": "error",
+    // Type-aware rules oxlint enables by default stay off until each is adopted on purpose.
+    "typescript/no-misused-spread": "off",
+    "typescript/no-base-to-string": "off",
+    "typescript/no-meaningless-void-operator": "off",
+    "typescript/no-floating-promises": "off",
+    "typescript/restrict-template-expressions": "off",
+    "typescript/no-duplicate-type-constituents": "off",
+    "typescript/require-array-sort-compare": "off",
+    "typescript/unbound-method": "off",
+    "typescript/await-thenable": "off",
+    "typescript/no-unsafe-unary-minus": "off",
+    "typescript/no-redundant-type-constituents": "off",
+    "typescript/no-implied-eval": "off"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  // The declarations of the library subpaths `script/build.ts` publishes beside the CLI.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "incremental": false,
+    "rootDir": "src",
+    "outDir": "dist/npm/types"
+  },
+  "include": ["src/event-watch.ts", "src/event-watch-tool.ts", "src/contract.ts"]
+}

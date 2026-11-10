@@ -1,0 +1,539 @@
+name: Publish Console CLI
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('Console CLI {0} from {1}', inputs.channel, github.ref_name) || '' }}"
+
+# Publishes the CLI (`opencode-console`): eleven binaries to Anomaly's release service
+# (https://anoma.ly/release/opencode-console/cli/<channel>.json), which installs follow, and for stable and beta the
+# binaries as @opencode/console-<target> and the Node bundle as @opencode/console on npm. RELEASING.md has the flow.
+#
+#   push to dev, or dispatch dev on dev               dev     <next patch>-dev.<run>: the release service only
+#   dispatch beta on production                       beta    <version>-beta.<run>: the release service, npm beta
+#   dispatch stable on production                     stable  package.json's version: the release service,
+#                                                             npm latest, tag v<version>
+#   dispatch check, on any branch                     check   builds and checks everything, signs ad hoc (macOS)
+#                                                             and with a throwaway key (Linux), and runs every publish
+#                                                             script as a dry run
+#
+# Builds are separated from signing and publishing (ported from anomalyco/browse's release.yml, 2b6194cf, and
+# anomalyco/hex's, a65a5e37):
+# - build and build-binaries run repository code (bun install, typecheck, tests, script/compile.ts) with no
+#   environment, secrets or id-token, and upload their artifacts with a SHA256SUMS whose digest they output.
+# - Every later job checks out only .github/release/, verifies each artifact against the digest of the job that made it,
+#   and runs those scripts on the artifacts as data. It never executes repository code.
+# - Only stable and beta sign, in environment signing (production only), which holds the Apple, Azure and Linux signing
+#   values; they fail when any is missing. Dev builds ship unsigned, so no push to dev can reach a signing key. Each
+#   signing job reads its values in one "Load signing secrets" step, the only step a move to a secrets manager changes.
+# - The release service runs in environment release (dev and production), which holds no secrets: the service admits
+#   it by OIDC. npm runs in environment npm (production only, no secrets), which every package's trusted publishing
+#   names, so no dev run can mint a token npm accepts.
+# .github/ is the security boundary for releases: changes to it need review by someone who may release.
+
+on:
+  push:
+    branches: [dev]
+    paths-ignore:
+      - "**/*.md"
+      - docs/**
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "check: build and dry-run everything. dev (on dev), beta or stable (on production): publish"
+        type: choice
+        options: [check, dev, beta, stable]
+        default: check
+      rollout_percent:
+        description: Beta and stable only. The share of installs that take the release at once
+        type: number
+        default: 100
+      required:
+        description: Beta and stable only. Every install takes it at once, whatever the rollout (a security fix)
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: publish-console-cli-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'dev' }}
+  # Never cancel a release halfway through publishing.
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CONSOLE_TEAM_ID: 5NZ4Q7NXJ4
+
+jobs:
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      channel: ${{ steps.plan.outputs.channel }}
+      npm_tag: ${{ steps.plan.outputs.npm_tag }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+      rollout: ${{ steps.plan.outputs.rollout }}
+      required: ${{ steps.plan.outputs.required }}
+      # Stable and beta can't ship without every platform signed.
+      signed: ${{ steps.plan.outputs.mode == 'stable' || steps.plan.outputs.mode == 'beta' }}
+    steps:
+      - &checkout-release
+        name: Check out the release scripts
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: plan
+        name: Plan
+        run: bash .github/release/plan-release.sh
+        env:
+          GH_TOKEN: ${{ github.token }} # reads package.json and the triggering actor's repository role
+          INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_ROLLOUT: ${{ inputs.rollout_percent }}
+          INPUT_REQUIRED: ${{ inputs.required }}
+
+  # ---- Build: repository code; no environment, secrets or id-token -------------------------------------------------
+
+  build:
+    name: Build and test the npm package
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+      - &setup-bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.3"
+      - run: bun install --frozen-lockfile
+      # Stamped into the checkout only, never committed.
+      - &stamp
+        name: Stamp the version
+        run: |
+          bun script/version.ts set "$VERSION"
+          [ "$(jq -r .version package.json)" = "$VERSION" ] || { echo "::error::The checkout isn't version $VERSION."; exit 1; }
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run build
+      - name: Pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/build"
+          npm pack ./dist/npm --pack-destination "$RUNNER_TEMP/build"
+          test -s "$RUNNER_TEMP/build/opencode-console-$VERSION.tgz"
+      - name: Run the packed CLI from a clean directory
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir smoke && cd smoke
+          cp "../build/opencode-console-$VERSION.tgz" .
+          test "$(npx --yes "./opencode-console-$VERSION.tgz" help | head -n 1)" = "opencode-console $VERSION"
+          npx --yes "./opencode-console-$VERSION.tgz" self-test
+      - id: upload
+        name: Upload
+        uses: ./.github/release/upload
+        with:
+          name: build
+          path: ${{ runner.temp }}/build
+
+  # The eleven binaries (script/compile.ts), cross-compiled against each target's Bun runtime from the pinned Bun
+  # release, checked against its SHASUMS256.txt, and packed as @opencode/console-<target> (script/pack.ts).
+  build-binaries:
+    name: Build the binaries
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - *setup-bun
+      - run: bun install --frozen-lockfile
+      - *stamp
+      - name: Compile and pack
+        run: |
+          BUN_COMPILE_RELEASE="bun-v$(bun --version)" bun script/compile.ts
+          bun script/pack.ts --out "$RUNNER_TEMP/binaries"
+      # The linux-x64 binaries as a member gets them: with node_modules moved away, so a file one read at run time from
+      # the build machine's node_modules fails here too. `self-test` decides policy and loads every agent's code;
+      # `check` is a hook's decision.
+      - name: Smoke test the linux-x64 binaries without node_modules
+        run: |
+          set -eu
+          mv node_modules node_modules.away
+          trap 'mv node_modules.away node_modules' EXIT
+          for target in linux-x64 linux-x64-baseline; do
+            dir=$(mktemp -d) home=$(mktemp -d)
+            tar -xzf "$RUNNER_TEMP/binaries/opencode-console-$target-$VERSION.tgz" -C "$dir"
+            binary="$dir/package/bin/opencode-console"
+            test "$(env -i HOME="$home" PATH=/usr/bin:/bin "$binary" help | head -n 1)" = "opencode-console $VERSION"
+            env -i HOME="$home" PATH=/usr/bin:/bin "$binary" self-test
+            decision=$(echo '{"action":"read","resources":["README.md"]}' | env -i HOME="$home" PATH=/usr/bin:/bin "$binary" check)
+            test "$decision" = '{"effect":"allow"}'
+          done
+      - id: upload
+        name: Upload
+        uses: ./.github/release/upload
+        with:
+          name: binaries
+          path: ${{ runner.temp }}/binaries
+
+  # ---- Sign: environment release; only .github/release/ is checked out ----------------------------------------------
+
+  # Developer ID, hardened runtime and notarization for the three macOS binaries, on stable and beta. A check run has no
+  # environment, so no secrets: it signs ad hoc, so the rest of the release still runs on its output.
+  sign-macos:
+    name: Sign and notarize the macOS binaries
+    needs: [plan, build-binaries]
+    runs-on: macos-26
+    timeout-minutes: 60
+    if: needs.plan.outputs.signed == 'true' || needs.plan.outputs.mode == 'check'
+    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing' || '' }}
+    permissions:
+      contents: read
+      id-token: write # for a secrets manager's OIDC sign-in
+    env:
+      CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+      CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - *checkout-release
+      # The only step that reads signing values. Moving them to a secrets manager replaces this step with its OIDC
+      # sign-in and fetch actions, which leave the same names in the job's environment.
+      - name: Load signing secrets
+        if: needs.plan.outputs.signed == 'true'
+        env:
+          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          CONSOLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          CONSOLE_NOTARY_ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          bash .github/release/export-env.sh APPLE_SIGNING_CERTIFICATE APPLE_SIGNING_CERTIFICATE_PASSWORD \
+            APPLE_NOTARY_KEY CONSOLE_NOTARY_KEY_ID CONSOLE_NOTARY_ISSUER
+      - id: credentials
+        name: Require the Apple values
+        env:
+          REQUIRED: ${{ needs.plan.outputs.signed }}
+        run: |
+          missing=
+          for name in APPLE_SIGNING_CERTIFICATE APPLE_NOTARY_KEY CONSOLE_NOTARY_KEY_ID CONSOLE_NOTARY_ISSUER; do
+            [ -n "$(printenv "$name")" ] || missing="$missing $name"
+          done
+          if [ "$REQUIRED" != true ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Check run: macOS binaries are signed ad hoc and not notarized." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$missing" ]; then
+            echo "::error::Stable and beta releases need signed macOS binaries, and environment signing lacks:$missing."
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: binaries
+          digests: binaries=${{ needs.build-binaries.outputs.digest }}
+      - name: Import the certificate and notary key
+        if: steps.credentials.outputs.available == 'true'
+        run: bash .github/release/macos-credentials.sh "$RUNNER_TEMP/credentials"
+      - name: Sign and notarize
+        run: bash .github/release/sign-macos.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/signed"
+      - name: Remove the credentials
+        if: always() && steps.credentials.outputs.available == 'true'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/credentials/signing.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/credentials"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: signed-macos
+          path: ${{ runner.temp }}/signed
+
+  # Authenticode through Azure Artifact Signing for the two Windows binaries, signed in by OIDC (the federated
+  # credential names repo:anomalyco/opencode-console-cli:environment:signing). A check run repacks them unsigned.
+  sign-windows:
+    name: Sign the Windows binaries
+    needs: [plan, build-binaries]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    if: needs.plan.outputs.signed == 'true' || needs.plan.outputs.mode == 'check'
+    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - *checkout-release
+      # The only step that reads signing values; see sign-macos.
+      - name: Load signing secrets
+        if: needs.plan.outputs.signed == 'true'
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+        run: |
+          bash .github/release/export-env.sh AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID \
+            AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT_NAME AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE
+      - id: credentials
+        name: Require the Azure values
+        env:
+          REQUIRED: ${{ needs.plan.outputs.signed }}
+        run: |
+          missing=
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_TRUSTED_SIGNING_ENDPOINT \
+            AZURE_TRUSTED_SIGNING_ACCOUNT_NAME AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE; do
+            [ -n "$(printenv "$name")" ] || missing="$missing $name"
+          done
+          if [ "$REQUIRED" != true ]; then
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Check run: Windows binaries are unpacked and repacked, not signed." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ -n "$missing" ]; then
+            echo "::error::Stable and beta releases need signed Windows binaries, and environment signing lacks:$missing."
+            exit 1
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: binaries
+          digests: binaries=${{ needs.build-binaries.outputs.digest }}
+      - name: Take out the executables
+        run: bash .github/release/windows-binaries.sh unpack "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/work"
+      - name: Sign in to Azure
+        if: steps.credentials.outputs.available == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+      - name: Sign
+        if: steps.credentials.outputs.available == 'true'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+        with:
+          endpoint: ${{ env.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ env.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ env.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+          files-folder: ${{ runner.temp }}\work\sign
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: OpenCode Console CLI
+          description-url: https://opencode.ai/console
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+      - name: Check the signatures
+        if: steps.credentials.outputs.available == 'true'
+        shell: pwsh
+        run: .github/release/verify-authenticode.ps1 -Folders "$env:RUNNER_TEMP/work/sign"
+      - name: Repack
+        run: bash .github/release/windows-binaries.sh repack "$RUNNER_TEMP/work" "$RUNNER_TEMP/signed"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: signed-windows
+          path: ${{ runner.temp }}/signed
+
+  # An ed25519 signature beside each Linux binary, which the updater checks with linux-signing.pub.
+  sign-linux:
+    name: Sign the Linux binaries
+    needs: [plan, build-binaries]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: needs.plan.outputs.signed == 'true' || needs.plan.outputs.mode == 'check'
+    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing' || '' }}
+    permissions:
+      contents: read
+      id-token: write # for a secrets manager's OIDC sign-in
+    env:
+      CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+      CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - *checkout-release
+      # The only step that reads signing values; see sign-macos.
+      - name: Load signing secrets
+        if: needs.plan.outputs.signed == 'true'
+        env:
+          CONSOLE_CLI_RELEASE_SIGNING_KEY: ${{ secrets.CONSOLE_CLI_RELEASE_SIGNING_KEY }}
+        run: bash .github/release/export-env.sh CONSOLE_CLI_RELEASE_SIGNING_KEY
+      - id: credentials
+        name: Require the Linux key
+        env:
+          REQUIRED: ${{ needs.plan.outputs.signed }}
+        run: |
+          if [ "$REQUIRED" != true ]; then
+            echo "::notice::Check run: Linux binaries are signed with a throwaway key." | tee -a "$GITHUB_STEP_SUMMARY"
+          elif [ -z "${CONSOLE_CLI_RELEASE_SIGNING_KEY:-}" ]; then
+            echo "::error::Stable and beta releases need signed Linux binaries, and environment signing lacks CONSOLE_CLI_RELEASE_SIGNING_KEY."
+            exit 1
+          fi
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: binaries
+          digests: binaries=${{ needs.build-binaries.outputs.digest }}
+      - name: Sign
+        run: bash .github/release/sign-linux.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/signed"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: signed-linux
+          path: ${{ runner.temp }}/signed
+
+  # ---- Publish: only .github/release/ is checked out; artifacts are data --------------------------------------------
+
+  # The job's OIDC token is the only credential; the service checks it against its registry entry for opencode-console
+  # (this repository and workflow, environment release, dev for channel dev and production for stable and beta).
+  publish-release-service:
+    name: Publish to the release service
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux]
+    # Dev skips signing; every other run needs all three signed.
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success' && needs.build-binaries.result == 'success'
+      && (needs.plan.outputs.mode == 'dev' || (needs.sign-macos.result == 'success'
+      && needs.sign-windows.result == 'success' && needs.sign-linux.result == 'success')) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - *checkout-release
+      - &download-all
+        name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: "{build,binaries,signed-*}"
+          digests: >-
+            build=${{ needs.build.outputs.digest }} binaries=${{ needs.build-binaries.outputs.digest }}
+            signed-macos=${{ needs.sign-macos.outputs.digest }} signed-windows=${{ needs.sign-windows.outputs.digest }}
+            signed-linux=${{ needs.sign-linux.outputs.digest }}
+      - name: Publish
+        run: |
+          bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/binaries" \
+            "$RUNNER_TEMP/in/signed-macos" "$RUNNER_TEMP/in/signed-windows" "$RUNNER_TEMP/in/signed-linux"
+        env:
+          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          CONSOLE_CHANNEL: ${{ needs.plan.outputs.channel }}
+          CONSOLE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
+          CONSOLE_ROLLOUT: ${{ needs.plan.outputs.rollout }}
+          CONSOLE_REQUIRED: ${{ needs.plan.outputs.required }}
+          CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+          CONSOLE_REQUIRE_SIGNED: ${{ needs.plan.outputs.mode != 'dev' }}
+          NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
+
+  # Beta and stable (and check, as a dry run), once the release service has the binaries: the platform packages
+  # @opencode/console-<target> first, then @opencode/console. Dev builds aren't published to npm.
+  publish-npm:
+    name: Publish to npm
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux, publish-release-service]
+    if: ${{ !cancelled() && needs.plan.outputs.channel != 'dev' && needs.publish-release-service.result == 'success' }}
+    # Trusted publishing accepts GitHub-hosted runners only.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'npm' || '' }}
+    permissions:
+      contents: read
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - *checkout-release
+      # Trusted publishing needs npm 11.5.1 or later, which current Node 24 releases ship.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          check-latest: true
+      - *download-all
+      - name: Publish
+        run: |
+          bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" \
+            "$RUNNER_TEMP/in/signed-macos" "$RUNNER_TEMP/in/signed-windows" "$RUNNER_TEMP/in/signed-linux"
+        env:
+          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          CONSOLE_CHANNEL: ${{ needs.plan.outputs.channel }}
+          CONSOLE_NPM_TAG: ${{ needs.plan.outputs.npm_tag }}
+          CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+          CONSOLE_REQUIRE_SIGNED: "true"
+
+  # Tells the release service which npm version matches its release, and for stable tags the commit and makes a GitHub
+  # release with the binaries. A separate job, in environment release, since npm's job holds another environment's
+  # OIDC token.
+  finish:
+    name: Record the npm release
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux, publish-npm]
+    if: ${{ !cancelled() && needs.plan.outputs.dry_run != 'true' && needs.publish-npm.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write # the tag and the GitHub release
+      id-token: write
+    steps:
+      - *checkout-release
+      - *download-all
+      - name: Record npm's version on the release service
+        env:
+          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          CONSOLE_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors https://anoma.ly/release/client.sh -o "$RUNNER_TEMP/client.sh"
+          bash "$RUNNER_TEMP/client.sh" distribution --app opencode-console --artifact cli --channel "$CONSOLE_CHANNEL" \
+            --entry "$(jq -nc --arg version "$CONSOLE_VERSION" '{kind: "npm", version: $version}')"
+      - name: Tag and GitHub release
+        if: needs.plan.outputs.mode == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ github.sha }}
+        run: |
+          . .github/release/lib.sh
+          files=()
+          for target in $TARGETS; do
+            files+=("$(target_file "$target" "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/in/signed-macos" "$RUNNER_TEMP/in/signed-windows" "$RUNNER_TEMP/in/signed-linux")")
+          done
+          gh release create "v$CONSOLE_VERSION" --target "$SHA" --title "OpenCode Console CLI $CONSOLE_VERSION" \
+            --notes "@opencode/console $CONSOLE_VERSION: https://anoma.ly/release/opencode-console/cli/stable.json" \
+            "$RUNNER_TEMP/in/build/opencode-console-$CONSOLE_VERSION.tgz" "${files[@]}"

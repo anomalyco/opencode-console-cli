@@ -1,0 +1,2 @@
+# .github/ is the release and signing boundary: jobs that hold secrets or OIDC tokens run only .github/release/.
+/.github/ @adamdotdevin @thdxr

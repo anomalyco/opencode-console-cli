@@ -1,0 +1,92 @@
+name: CI
+
+# Every pull request and every push to dev, or a dispatch to rerun them. GitHub-hosted runners and no secrets, so a
+# fork's pull request runs the same checks a maintainer's does. `Checks` is the status check the dev and production rulesets require.
+
+on:
+  pull_request:
+    branches-ignore: [production]
+  push:
+    branches: [dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    name: Checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.4.3"
+      - run: bun install --frozen-lockfile
+      - name: Format, lint and typecheck
+        run: bun run fmt:check && bun run lint && bun run typecheck
+      - name: Test
+        run: bun run test
+      - name: Build and pack the npm package
+        run: |
+          bun run build
+          mkdir -p "$RUNNER_TEMP/npm"
+          npm pack ./dist/npm --pack-destination "$RUNNER_TEMP/npm"
+      # From a clean directory, as `npx @opencode/console` runs it: nothing but the tarball and Node.
+      - &npx-smoke
+        name: Run the packed CLI from a clean directory
+        working-directory: ${{ runner.temp }}
+        run: |
+          version=$(jq -r .version "$GITHUB_WORKSPACE/package.json")
+          rm -rf smoke && mkdir smoke && cd smoke
+          cp "../npm/opencode-console-$version.tgz" .
+          test "$(npx --yes "./opencode-console-$version.tgz" help | head -n 1)" = "opencode-console $version"
+          npx --yes "./opencode-console-$version.tgz" self-test
+      # Again on Node 22, the oldest the package's engines allow.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - *npx-smoke
+      # The binary as a member gets it: with node_modules moved away, so a file read at run time from the build
+      # machine's node_modules fails here too. `self-test` decides policy and loads every agent's code; `check` is a
+      # hook's decision.
+      - name: Compile, pack and smoke test the linux-x64 binary
+        run: |
+          set -eu
+          version=$(jq -r .version package.json)
+          bun script/compile.ts linux-x64
+          bun script/pack.ts --out "$RUNNER_TEMP/binaries"
+          mv node_modules node_modules.away
+          trap 'mv node_modules.away node_modules' EXIT
+          dir=$(mktemp -d) home=$(mktemp -d)
+          tar -xzf "$RUNNER_TEMP/binaries/opencode-console-linux-x64-$version.tgz" -C "$dir"
+          binary="$dir/package/bin/opencode-console"
+          test "$(env -i HOME="$home" PATH=/usr/bin:/bin "$binary" help | head -n 1)" = "opencode-console $version"
+          env -i HOME="$home" PATH=/usr/bin:/bin "$binary" self-test
+          decision=$(echo '{"action":"read","resources":["README.md"]}' | env -i HOME="$home" PATH=/usr/bin:/bin "$binary" check)
+          test "$decision" = '{"effect":"allow"}'
+      - name: Shellcheck the installer, release and e2e scripts
+        run: |
+          shellcheck .github/release/*.sh script/e2e/*.sh
+          shellcheck -s sh install
+      - name: Lint the workflows
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/actionlint.tgz" \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
