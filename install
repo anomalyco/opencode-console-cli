@@ -1,10 +1,10 @@
 #!/bin/sh
 # Installs the OpenCode Console CLI without Node: downloads the opencode-console binary for this computer from Anomaly's
 # release service, checks its size, SHA-256 and signature, runs its self-test, then hands over to it. Its `setup`
-# installs it where agents run it, connects the agent and keeps it up to date. Served at https://opencode.ai/console/install;
+# installs it where agents run it, connects the agent and keeps it up to date. To be served at https://opencode.ai/console/install;
 # `npx @opencode/console setup <agent>` does the same with Node. Ported from anomalyco/browse's install (2b6194cf).
 #
-#   curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code
+#   curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install | sh -s -- setup claude-code
 set -eu
 
 RED='\033[0;31m'
@@ -25,9 +25,9 @@ Options:
 Everything after the options goes to opencode-console, e.g. setup claude-code --keep-provider.
 
 Examples:
-    curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code
-    curl -fsSL https://opencode.ai/console/install | sh -s -- --channel dev setup codex
-    curl -fsSL https://opencode.ai/console/install | sh -s -- --version 0.1.9 setup pi
+    curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install | sh -s -- setup claude-code
+    curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install | sh -s -- --channel dev setup codex
+    curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install | sh -s -- --version 0.1.9 setup pi
 
 OPENCODE_CONSOLE_VERSION sets --version, OPENCODE_CONSOLE_RELEASE_SERVICE the release service.
 EOF
@@ -117,7 +117,7 @@ raw_os=$(uname -s)
 case "$raw_os" in
     Darwin*) os=darwin ;;
     Linux*) os=linux ;;
-    MINGW* | MSYS* | CYGWIN*) fail "on Windows, run in PowerShell: & ([scriptblock]::Create((irm https://opencode.ai/console/install.ps1))) setup <agent>" ;;
+    MINGW* | MSYS* | CYGWIN*) fail "on Windows, run in PowerShell: & ([scriptblock]::Create((irm https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install.ps1))) setup <agent>" ;;
     *) fail "no binary for $raw_os; run npx @opencode/console setup <agent> with Node instead" ;;
 esac
 arch=$(uname -m)
@@ -230,7 +230,7 @@ chmod 755 "$binary"
 
 if [ $# -eq 0 ]; then
     printf '%b\n' "opencode-console $version checks out. Run the installer again with the agent to connect:"
-    printf '%b\n' "${MUTED}  curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code${NC}"
+    printf '%b\n' "${MUTED}  curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install | sh -s -- setup claude-code${NC}"
     exit 0
 fi
 # The release archive setup's receipt names, which the release service tells builds apart by.

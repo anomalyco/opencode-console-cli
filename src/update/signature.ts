@@ -15,6 +15,7 @@ import { spawn } from "node:child_process"
 import { createHash, createPublicKey, verify } from "node:crypto"
 import { existsSync, readFileSync } from "node:fs"
 import type { CliInstall } from "../install"
+import { UpdateEnvironment } from "./environment"
 
 /**
  * Anomaly's ed25519 release key for Linux binaries, `.github/release/linux-signing.pub` (the
@@ -93,6 +94,7 @@ export function verifyMacos(binary: string, requirement = MACOS_REQUIREMENT) {
   return new Promise<void>((resolve, reject) => {
     const child = spawn("/usr/bin/codesign", ["--verify", "--strict", `-R=${requirement}`, binary], {
       stdio: ["ignore", "ignore", "pipe"],
+      env: UpdateEnvironment.tool(),
     })
     const errors: Buffer[] = []
     const timer = setTimeout(() => child.kill("SIGKILL"), 60_000)
@@ -118,18 +120,22 @@ export function verifyMacos(binary: string, requirement = MACOS_REQUIREMENT) {
  * Windows decides from the chain and timestamp, and signed by `signer`.
  */
 export function verifyWindows(binary: string, signer = WINDOWS_SIGNER) {
-  const { PSModulePath: _modules, ...env } = process.env
   return new Promise<void>((resolve, reject) => {
     const child = spawn(
-      `${process.env.SystemRoot ?? "C:\\Windows"}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
+      `${UpdateEnvironment.systemRoot()}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe`,
       [
         "-NoProfile",
         "-NonInteractive",
         "-Command",
         "$s = Get-AuthenticodeSignature -LiteralPath $env:OPENCODE_CONSOLE_UPDATE_FILE; [Console]::Out.Write(\"$($s.Status)`n\"); if ($s.SignerCertificate) { [Console]::Out.Write($s.SignerCertificate.GetNameInfo('SimpleName', $false)) }",
       ],
-      // A PowerShell 7 parent's module path breaks Windows PowerShell's own modules, its security module among them.
-      { env: { ...env, OPENCODE_CONSOLE_UPDATE_FILE: binary }, stdio: ["ignore", "pipe", "ignore"], windowsHide: true },
+      // A fixed environment: nothing of the parent's PSModulePath, which from a PowerShell 7 parent breaks Windows
+      // PowerShell's own security module, or anything else a project set.
+      {
+        env: { ...UpdateEnvironment.tool("win32"), OPENCODE_CONSOLE_UPDATE_FILE: binary },
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      },
     )
     const output: Buffer[] = []
     const timer = setTimeout(() => child.kill(), 60_000)

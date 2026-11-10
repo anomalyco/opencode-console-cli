@@ -21,6 +21,7 @@ import { ConsoleStore } from "../store"
 import { AutoUpdate } from "./auto-update"
 import { ReleaseService } from "./release-service"
 import { Signature } from "./signature"
+import { UpdateEnvironment } from "./environment"
 
 export const NPM_REGISTRY = "https://registry.npmjs.org"
 
@@ -393,10 +394,15 @@ function installedNow(
 function unpack(archive: string, directory: string, members: readonly string[] = []) {
   const tar =
     process.platform === "win32"
-      ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe")
+      ? path.join(UpdateEnvironment.systemRoot(), "System32", "tar.exe")
       : ["/usr/bin/tar", "/bin/tar"].find((file) => existsSync(file))
   if (!tar || !existsSync(tar)) throw new Error("no system tar to unpack the update with")
-  const result = spawnSync(tar, ["-xzf", archive, "-C", directory, ...members], { encoding: "utf8", windowsHide: true })
+  // A fixed environment, so a project's TAR_OPTIONS can't add to what this extracts.
+  const result = spawnSync(tar, ["-xzf", archive, "-C", directory, ...members], {
+    encoding: "utf8",
+    windowsHide: true,
+    env: UpdateEnvironment.tool(),
+  })
   return result.status === 0 ? undefined : result.stderr.trim()
 }
 

@@ -29,8 +29,8 @@ for target in $TARGETS; do
   case "$target" in linux-*) ;; *) continue ;; esac
   file="$in/$(tarball_name "$target")"
   test -s "$file" || die "Missing $file"
-  mkdir -p "$work/$target"
-  tar -xzf "$file" -C "$work/$target" package/package.json package/LICENSE package/bin/opencode-console
+  read -ra unsigned <<< "$(members "$target")"
+  unpack "$file" "$work/$target" "${unsigned[@]}"
   bin="$work/$target/package/bin/opencode-console"
   sha=$(sha256 "$bin" | cut -c1-64)
   printf 'anomaly.opencode-console.linux-artifact.v1\n%s\n' "$sha" > "$work/message"
@@ -40,6 +40,7 @@ for target in $TARGETS; do
   openssl pkeyutl -verify -rawin -pubin -inkey "$public" \
     -in "$work/message" -sigfile "$bin.sig" > /dev/null ||
     die "CONSOLE_CLI_RELEASE_SIGNING_KEY does not match linux-signing.pub, the key the updater trusts."
-  repack "$work/$target" "$out/$(tarball_name "$target")"
+  read -ra signed <<< "$(members "$target" signed)"
+  repack "$work/$target" "$out/$(tarball_name "$target")" "${signed[@]}"
   echo "Signed $target ($sha)."
 done

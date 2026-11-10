@@ -16,13 +16,13 @@ or later, and installs the signed `opencode-console` binary for your computer, w
 ## Install without Node
 
 ```sh
-curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code
+curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install | sh -s -- setup claude-code
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm https://opencode.ai/console/install.ps1))) setup claude-code
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install.ps1))) setup claude-code
 ```
 
 The installer downloads the binary for your computer from Anomaly's release service (`https://anoma.ly/release`), checks

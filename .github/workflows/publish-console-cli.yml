@@ -25,7 +25,9 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Console CLI {
 # - The release service runs in environment release (dev and production), which holds no secrets: the service admits
 #   it by OIDC. npm runs in environment npm (production only, no secrets), which every package's trusted publishing
 #   names, so no dev run can mint a token npm accepts.
-# .github/ is the security boundary for releases: changes to it need review by someone who may release.
+# .github/ is the security boundary for releases. Changes to it need a code owner's review, which repository admins
+# may skip when merging a pull request. Required Checks and the merge methods apply to everyone, and only admins and
+# maintainers may merge into production.
 
 on:
   push:
@@ -119,10 +121,14 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
+          package-manager-cache: false
+      # No step here restores a cache: dev is the default branch, so a production run could restore one a dev run
+      # wrote, and the build would run what it holds.
       - &setup-bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.4.3"
+          no-cache: true
       - run: bun install --frozen-lockfile
       # Stamped into the checkout only, never committed.
       - &stamp
@@ -274,8 +280,9 @@ jobs:
           name: signed-macos
           path: ${{ runner.temp }}/signed
 
-  # Authenticode through Azure Artifact Signing for the two Windows binaries, signed in by OIDC (the federated
-  # credential names repo:anomalyco/opencode-console-cli:environment:signing). A check run repacks them unsigned.
+  # Authenticode through Azure Artifact Signing for the two Windows binaries, signed in by OIDC. This repository uses
+  # immutable OIDC subjects, so the federated credential names
+  # repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:signing. A check run repacks them unsigned.
   sign-windows:
     name: Sign the Windows binaries
     needs: [plan, build-binaries]
@@ -352,6 +359,8 @@ jobs:
           timestamp-digest: SHA256
           description: OpenCode Console CLI
           description-url: https://opencode.ai/console
+          # Its PowerShell module and build tools would otherwise come from a cache any branch's run can write.
+          cache-dependencies: false
           exclude-environment-credential: true
           exclude-workload-identity-credential: true
           exclude-managed-identity-credential: true
@@ -424,16 +433,42 @@ jobs:
 
   # ---- Publish: only .github/release/ is checked out; artifacts are data --------------------------------------------
 
+  # Stable only, before anything leaves GitHub: claims refs/tags/v<version> at this run's commit (reserve-tag.sh), so a
+  # tag someone made at another commit stops the release before it publishes rather than after. A rerun at the same
+  # commit finds its own tag.
+  reserve-tag:
+    name: Reserve the release tag
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux]
+    if: >-
+      ${{ !cancelled() && needs.plan.outputs.mode == 'stable' && needs.build.result == 'success'
+      && needs.build-binaries.result == 'success' && needs.sign-macos.result == 'success'
+      && needs.sign-windows.result == 'success' && needs.sign-linux.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release
+    permissions:
+      contents: write # creates the tag's ref
+    steps:
+      - *checkout-release
+      - name: Reserve
+        run: bash .github/release/reserve-tag.sh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ github.sha }}
+
   # The job's OIDC token is the only credential; the service checks it against its registry entry for opencode-console
   # (this repository and workflow, environment release, dev for channel dev and production for stable and beta).
   publish-release-service:
     name: Publish to the release service
-    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux]
-    # Dev skips signing; every other run needs all three signed.
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux, reserve-tag]
+    # Dev skips signing; every other run needs all three signed, and stable its tag reserved.
     if: >-
       ${{ !cancelled() && needs.build.result == 'success' && needs.build-binaries.result == 'success'
       && (needs.plan.outputs.mode == 'dev' || (needs.sign-macos.result == 'success'
-      && needs.sign-windows.result == 'success' && needs.sign-linux.result == 'success')) }}
+      && needs.sign-windows.result == 'success' && needs.sign-linux.result == 'success'))
+      && (needs.plan.outputs.mode != 'stable' || needs.reserve-tag.result == 'success') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
@@ -485,6 +520,7 @@ jobs:
         with:
           node-version: "24"
           check-latest: true
+          package-manager-cache: false
       - *download-all
       - name: Publish
         run: |
@@ -518,7 +554,8 @@ jobs:
           CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
           CONSOLE_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: |
-          curl -fsSL --retry 5 --retry-all-errors https://anoma.ly/release/client.sh -o "$RUNNER_TEMP/client.sh"
+          . .github/release/lib.sh
+          release_client "$RUNNER_TEMP/client.sh"
           bash "$RUNNER_TEMP/client.sh" distribution --app opencode-console --artifact cli --channel "$CONSOLE_CHANNEL" \
             --entry "$(jq -nc --arg version "$CONSOLE_VERSION" '{kind: "npm", version: $version}')"
       - name: Tag and GitHub release
@@ -528,12 +565,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
           CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
           SHA: ${{ github.sha }}
+        # The tag reserve-tag made at this commit; --verify-tag refuses to make one. A rerun after the release was made
+        # uploads its files again in place.
         run: |
           . .github/release/lib.sh
-          files=()
+          files=("$RUNNER_TEMP/in/build/opencode-console-$CONSOLE_VERSION.tgz")
           for target in $TARGETS; do
             files+=("$(target_file "$target" "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/in/signed-macos" "$RUNNER_TEMP/in/signed-windows" "$RUNNER_TEMP/in/signed-linux")")
           done
-          gh release create "v$CONSOLE_VERSION" --target "$SHA" --title "OpenCode Console CLI $CONSOLE_VERSION" \
-            --notes "@opencode/console $CONSOLE_VERSION: https://anoma.ly/release/opencode-console/cli/stable.json" \
-            "$RUNNER_TEMP/in/build/opencode-console-$CONSOLE_VERSION.tgz" "${files[@]}"
+          SHA=$SHA bash .github/release/reserve-tag.sh
+          if gh release view "v$CONSOLE_VERSION" > /dev/null 2>&1; then
+            gh release upload "v$CONSOLE_VERSION" --clobber "${files[@]}"
+          else
+            gh release create "v$CONSOLE_VERSION" --verify-tag --title "OpenCode Console CLI $CONSOLE_VERSION" \
+              --notes "@opencode/console $CONSOLE_VERSION: https://anoma.ly/release/opencode-console/cli/stable.json" \
+              "${files[@]}"
+          fi

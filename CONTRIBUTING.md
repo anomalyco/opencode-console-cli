@@ -34,7 +34,7 @@ agent configs.
 - CI's `Checks` passing: format, lint, typecheck, tests, the packed npm package and a compiled linux-x64 binary.
 - A title like `fix(codex): keep a model_provider set before setup`. Types are `feat`, `fix`, `docs`, `chore`,
   `refactor` and `test`.
-- A maintainer's review. Changes under `.github/` (the release workflow and signing scripts) need one of the
-  maintainers in `.github/CODEOWNERS`.
+- A maintainer's review. Changes under `.github/` (the release workflow and signing scripts) need a review from a
+  code owner in `.github/CODEOWNERS`, which repository admins may skip when they merge.
 
 Pull requests are squash-merged into `dev`. See [RELEASING.md](RELEASING.md) for how `dev` becomes a release.

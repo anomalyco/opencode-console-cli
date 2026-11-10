@@ -26,15 +26,15 @@ export COPYFILE_DISABLE=1
 for target in darwin-arm64 darwin-x64 darwin-x64-baseline; do
   file="$in/$(tarball_name "$target")"
   test -s "$file" || die "Missing $file"
-  mkdir -p "$work/$target"
-  tar -xzf "$file" -C "$work/$target" package/package.json package/LICENSE package/bin/opencode-console
+  read -ra files <<< "$(members "$target")"
+  unpack "$file" "$work/$target" "${files[@]}"
   bin="$work/$target/package/bin/opencode-console"
   file -b "$bin" | grep -q '^Mach-O' || die "$target is not a Mach-O binary"
   if dry_run; then
     codesign --force --options runtime --entitlements "$release/entitlements/cli.plist" \
       --identifier anomaly.opencode-console --sign - "$bin"
     codesign --verify --strict --verbose=2 -R='identifier "anomaly.opencode-console"' "$bin"
-    repack "$work/$target" "$out/$(tarball_name "$target")"
+    repack "$work/$target" "$out/$(tarball_name "$target")" "${files[@]}"
     echo "Dry run: signed $(tarball_name "$target") ad hoc."
     continue
   fi
@@ -57,6 +57,6 @@ for target in darwin-arm64 darwin-x64 darwin-x64-baseline; do
     [ "$attempt" -lt 6 ] || die "$target doesn't satisfy macos-requirement.txt after notarization."
     sleep 20
   done
-  repack "$work/$target" "$out/$(tarball_name "$target")"
+  repack "$work/$target" "$out/$(tarball_name "$target")" "${files[@]}"
   echo "Signed and notarized $(tarball_name "$target")."
 done
