@@ -18,7 +18,8 @@ every push to it publishes a dev build. Beta and stable releases are dispatched 
   `src/hermes*.ts`: each agent's setup, hook or in-process plugin.
 - `src/credentials.ts`, `src/store.ts`: the sign-in and the CLI's data directory.
 - `src/install.ts`, `src/update/`: where setup installs the CLI, self-update, signature checks and rollback.
-- `install`, `install.ps1`: the standalone installers served at `https://opencode.ai/console/install[.ps1]`.
+- `install`, `install.ps1`: the standalone installers, from `production` on `raw.githubusercontent.com` until Console
+  serves them at `https://opencode.ai/console/install[.ps1]` (RELEASING.md, "The installers").
 - `.github/release/`: the release scripts. Jobs holding secrets run only these.
 - `test/support/`: the stand-in Console and release service every test runs against.
 

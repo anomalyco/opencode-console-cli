@@ -163,6 +163,45 @@ test("leaves a receipt for a binary, with the release archive it came from", () 
   expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel: "stable", sha256: "a".repeat(64) })
 })
 
+test("drops the build kept for a rollback when setup moves the install to another channel", () => {
+  const store = temporaryStore()
+  const root = mkdtempSync(path.join(os.tmpdir(), "opencode-console-bin-"))
+  roots.push(root)
+  writeFileSync(path.join(root, "opencode-console"), "binary")
+  const kept = CliInstall.previousDirectory(store)
+  mkdirSync(kept, { recursive: true })
+  writeFileSync(path.join(kept, "opencode-console"), "a dev build")
+  const dev = { method: "direct", version: `${version}-dev.4`, channel: "dev" }
+  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(dev))
+  mkdirSync(CliInstall.directory(store), { recursive: true })
+  writeFileSync(
+    CliInstall.receiptFile(CliInstall.directory(store)),
+    JSON.stringify({ ...dev, version: `${version}-dev.5` }),
+  )
+
+  CliInstall.install(store, { execPath: path.join(root, "opencode-console") })
+
+  expect(CliInstall.receipt(store)).toMatchObject({ channel: "stable" })
+  expect(existsSync(kept)).toBe(false)
+})
+
+test("keeps the build kept for a rollback when setup runs again on the same channel", () => {
+  const store = temporaryStore()
+  const root = mkdtempSync(path.join(os.tmpdir(), "opencode-console-bin-"))
+  roots.push(root)
+  writeFileSync(path.join(root, "opencode-console"), "binary")
+  const kept = CliInstall.previousDirectory(store)
+  mkdirSync(kept, { recursive: true })
+  const stable = { method: "direct", version: "0.1.8", channel: "stable" }
+  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(stable))
+  mkdirSync(CliInstall.directory(store), { recursive: true })
+  writeFileSync(CliInstall.receiptFile(CliInstall.directory(store)), JSON.stringify({ ...stable, version }))
+
+  CliInstall.install(store, { execPath: path.join(root, "opencode-console") })
+
+  expect(CliInstall.receipt(store, kept)).toMatchObject(stable)
+})
+
 test("names a dev build's channel dev, so it follows dev builds", () => {
   expect(CliInstall.channelOf("0.1.8-dev.142")).toBe("dev")
   expect(CliInstall.channelOf("0.1.8-beta.3")).toBe("beta")

@@ -75,8 +75,8 @@ hook() {
     console.log(await child.exited)
   ' "$1"
 }
-# repack <dir with package/> <out>, as lib.sh does
-repack() { (. "$REPO/.github/release/lib.sh"; repack "$1" "$2"); }
+# repack_as <dir with package/> <out> <target> [signed]: lib.sh's repack, with the target's fixed members
+repack_as() { (. "$REPO/.github/release/lib.sh"; read -ra files <<< "$(members "$3" "${4:-}")"; repack "$1" "$2" "${files[@]}"); }
 
 section "Build: stable binaries 0.1.9, 0.1.10, 0.1.11, signed by the real sign-linux.sh with a throwaway key"
 patch
@@ -90,10 +90,10 @@ mkdir -p "$ROOT/work/other" "$ROOT/work/swapped"
 tar -xzf "$ROOT/rel/packs/0.1.11/opencode-console-linux-x64-0.1.11.tgz" -C "$ROOT/work/other"
 printf 'anomaly.opencode-console.linux-artifact.v1\n%s\n' "$(sha256sum "$ROOT/work/other/package/bin/opencode-console" | cut -c1-64)" > "$ROOT/work/message"
 openssl pkeyutl -sign -rawin -inkey "$ROOT/keys/other.pem" -in "$ROOT/work/message" -out "$ROOT/work/other/package/bin/opencode-console.sig"
-repack "$ROOT/work/other" "$ROOT/rel/other-0.1.11.tgz"
+repack_as "$ROOT/work/other" "$ROOT/rel/other-0.1.11.tgz" linux-x64 signed
 tar -xzf "$ROOT/rel/packs/0.1.11/opencode-console-linux-x64-0.1.11.tgz" -C "$ROOT/work/swapped"
 tar -xzOf "$ROOT/rel/signed/0.1.10/opencode-console-linux-x64-0.1.10.tgz" package/bin/opencode-console.sig > "$ROOT/work/swapped/package/bin/opencode-console.sig"
-repack "$ROOT/work/swapped" "$ROOT/rel/swapped-0.1.11.tgz"
+repack_as "$ROOT/work/swapped" "$ROOT/rel/swapped-0.1.11.tgz" linux-x64 signed
 version 0.1.9
 bun run build >/dev/null || { echo "npm build failed"; exit 1; }
 
@@ -150,7 +150,8 @@ for target in $TARGETS; do
   [ "$os" = linux ] && head -c 64 /dev/zero > "$dir/package/bin/opencode-console.sig"
   jq -n --arg name "@opencode/console-$target" --arg os "$os" --arg cpu "$arch" --arg libc "$libc" \
     '{name: $name, version: "0.1.11", license: "MIT", os: [$os], cpu: [$cpu]} + (if $libc == "" then {} else {libc: [$libc]} end) + {publishConfig: {access: "public"}}' > "$dir/package/package.json"
-  repack "$dir" "$RUNNER_TEMP/in/binaries/opencode-console-$target-0.1.11.tgz"
+  signed=; [ "$os" = linux ] && signed=signed
+  repack_as "$dir" "$RUNNER_TEMP/in/binaries/opencode-console-$target-0.1.11.tgz" "$target" "$signed"
 done
 version 0.1.11 && bun run build >/dev/null && npm pack ./dist/npm --pack-destination "$RUNNER_TEMP/in/build" >/dev/null
 digest=$(bash "$REPO/.github/release/write-checksums.sh" "$RUNNER_TEMP/in/binaries" 2>/dev/null)

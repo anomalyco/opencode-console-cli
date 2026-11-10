@@ -13,6 +13,7 @@ import path from "node:path"
 import { Effect, Option, Schema } from "effect"
 import { CliInstall } from "../install"
 import { ConsoleStore } from "../store"
+import { UpdateEnvironment } from "./environment"
 
 export const HOUR_MS = 3_600_000
 /** A session start checks right away, unless another did within this long. */
@@ -137,13 +138,12 @@ export const selfTest: SelfTest = (command, timeoutMs = 30_000) => {
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
       env: {
-        PATH: process.env.PATH,
+        ...UpdateEnvironment.tool(),
         HOME: home,
         USERPROFILE: home,
         XDG_DATA_HOME: path.join(home, "data"),
         XDG_CACHE_HOME: path.join(home, "cache"),
         XDG_CONFIG_HOME: path.join(home, "config"),
-        ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
         OPENCODE_CONSOLE_AUTO_UPDATE: "off",
       },
     })
@@ -260,7 +260,7 @@ export const detached: Start = (command, log) => {
       detached: true,
       stdio: ["ignore", descriptor, descriptor],
       windowsHide: true,
-      env: process.env,
+      env: UpdateEnvironment.cli(),
     })
       .on("error", () => undefined)
       .unref()

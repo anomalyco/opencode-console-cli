@@ -44,7 +44,7 @@ fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-curl -fsSL --retry 5 --retry-all-errors "$release/client.sh" -o "$work/client.sh"
+RELEASE_ORIGIN=$release release_client "$work/client.sh"
 # npm's copy is recorded once it's on npm (publish-npm.sh); dev builds aren't published there.
 distributions='[{"kind":"direct"}]'
 if [ "$CONSOLE_CHANNEL" != dev ]; then

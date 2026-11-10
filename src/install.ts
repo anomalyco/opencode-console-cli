@@ -104,10 +104,14 @@ export function install(
   platform: NodeJS.Platform = process.platform,
 ): readonly string[] {
   const target = directory(store)
+  const before = receipt(store)
+  // The build kept for a rollback is the last that worked on this channel. Setup moving the install to another one
+  // drops it, so a crashing stable build can't roll back to an unsigned dev build kept from before.
+  if (before !== undefined && before.channel !== channelOf(version))
+    rmSync(previousDirectory(store), { recursive: true, force: true })
   if (running.entry === undefined) {
     const built = BuildInfo.target()
     // Run again from the installed binary, setup still knows which release archive that came from.
-    const before = receipt(store)
     // Only a SHA-256: anything else in the receipt would leave it unreadable, and the install unable to update.
     const sha256 =
       (running.sha256 !== undefined && /^[0-9a-f]{64}$/.test(running.sha256) ? running.sha256 : undefined) ??
@@ -284,7 +288,7 @@ export function activateBundle(store: ConsoleStore.Info, staged: string) {
  */
 export function restore(store: ConsoleStore.Info, platform = process.platform) {
   const installed = receipt(store)
-  const previous = receipt(store, previousDirectory(store))
+  const previous = previousReceipt(store)
   if (!installed || !previous || previous.method !== installed.method) return undefined
   if (installed.method === "npm-bundle") {
     const retired = `${directory(store)}.${randomUUID()}.old`
@@ -304,11 +308,23 @@ export function restore(store: ConsoleStore.Info, platform = process.platform) {
 
 /** The command that runs the last binary or bundle that worked, for its self-test before a rollback. */
 export function previousCommand(store: ConsoleStore.Info, platform = process.platform) {
-  const previous = receipt(store, previousDirectory(store))
+  const previous = previousReceipt(store)
   if (!previous) return undefined
   return previous.method === "direct"
     ? [path.join(previousDirectory(store), binaryName(platform))]
     : [previous.node ?? "node", path.join(previousDirectory(store), "index.js")]
+}
+
+/**
+ * The receipt of the build kept for a rollback, when it's from the installed build's channel. One from another channel
+ * is never run, not even for its self-test, whatever left it there.
+ */
+function previousReceipt(store: ConsoleStore.Info) {
+  const installed = receipt(store)
+  const previous = receipt(store, previousDirectory(store))
+  return previous !== undefined && installed !== undefined && previous.channel === installed.channel
+    ? previous
+    : undefined
 }
 
 /** The SHA-256 of a file, in hex. */
