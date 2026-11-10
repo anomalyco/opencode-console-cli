@@ -2,6 +2,7 @@ import { afterEach, expect, test } from "bun:test"
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { Hermes } from "../src/hermes"
 import { AutoUpdate } from "../src/update/auto-update"
 import { UpdateEnvironment } from "../src/update/environment"
 
@@ -13,6 +14,7 @@ const project = {
   HOME: "/home/member",
   OPENCODE_API_KEY: "key",
   CODEX_HOME: "/home/member/.codex",
+  HERMES_DATA_DIR_SUFFIX: "-work",
   TAR_OPTIONS: "--exclude=*",
   BUN_OPTIONS: "--preload ./evil.ts",
   NODE_OPTIONS: "--require ./evil.js",
@@ -37,8 +39,16 @@ test("the CLI an update starts keeps where its data and the agents are, and drop
     HOME: "/home/member",
     OPENCODE_API_KEY: "key",
     CODEX_HOME: "/home/member/.codex",
+    HERMES_DATA_DIR_SUFFIX: "-work",
     PATH: "/repo/bin:/usr/bin",
   })
+})
+
+test("a refresh after a rollback finds the same Hermes home as the hook that started it", () => {
+  const env = UpdateEnvironment.cli("linux", project)
+  expect(Hermes.paths({ env, home: "/home/member", platform: "linux" }).home).toBe(
+    Hermes.paths({ env: project, home: "/home/member", platform: "linux" }).home,
+  )
 })
 
 test("takes Windows' directory from SystemRoot only when it is a drive's Windows", () => {

@@ -60,10 +60,13 @@ const KEPT = new Set([
   "SSL_CERT_FILE",
   "SSL_CERT_DIR",
   "NODE_EXTRA_CA_CERTS",
-  // Where agents keep their settings, which `sync --refresh-agents` rewrites.
+  // Where agents keep their settings, which `sync --refresh-agents` rewrites. Variables an agent sets only while it
+  // runs a hook (HERMES_SAFE_MODE, CLAUDE_CODE_SIMPLE) and values setup writes into settings (ANTHROPIC_*, OTEL_*)
+  // change neither.
   "CLAUDE_CONFIG_DIR",
   "CODEX_HOME",
   "HERMES_HOME",
+  "HERMES_DATA_DIR_SUFFIX",
   "DSH_HOME",
   "PI_CODING_AGENT_DIR",
 ])
