@@ -71,11 +71,13 @@ back. On a member's machine, a build whose hooks crash three times in a row also
   service admits them by OIDC: `refs/heads/dev` for `dev`, `refs/heads/production` for beta and stable.
 - `publish-npm` runs in environment `npm` (`production` only, no secrets), which every package's npm trusted publishing
   names, and publishes with `--provenance`. npm accepts provenance only from a public repository.
-- Changes to `.github/` need a review from `.github/CODEOWNERS`: the `dev` and `production` rulesets require a code
-  owner's review for them. The `.github maintainer-only` push ruleset only applies while the repository is private;
-  GitHub turns push rulesets off when a repository becomes public, so don't count on it afterwards.
-- Only the Repository admin and Maintain roles can update `production`, so only a maintainer can merge the promotion
-  pull request.
+- Changes to `.github/` need a review from a code owner in `.github/CODEOWNERS` (the `code owners` ruleset, on `dev`
+  and `production`). Repository admins may skip that review when they merge a pull request. Required `Checks` and the
+  merge methods (squash into `dev`, a merge commit into `production`) apply to everyone, admins included.
+- Only repository admins and maintainers may merge into `production`, so only they can merge the promotion pull
+  request.
+- The `.github maintainer-only` push ruleset only applies while the repository is private. GitHub turns push rulesets
+  off when a repository becomes public, so don't count on it afterwards.
 - Anyone with write access can rerun a run's failed jobs. A rerun keeps the run's commit, channel and inputs, so a
   writer can finish a release a maintainer dispatched, such as by rerunning `publish-npm` after a network failure, but
   can't start one or change what it publishes.

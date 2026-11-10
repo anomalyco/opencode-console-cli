@@ -115,7 +115,7 @@ unpack() {
   mkdir -p "$dir"
   tar -xzf "$file" -C "$dir" -- "$@"
   for member in "$@"; do
-    [ -f "$dir/$member" ] && [ ! -L "$dir/$member" ] || die "$file's $member didn't unpack as a regular file."
+    if [ ! -f "$dir/$member" ] || [ -L "$dir/$member" ]; then die "$file's $member didn't unpack as a regular file."; fi
   done
 }
 
@@ -126,7 +126,7 @@ repack() {
   local work=$1 out=$2 member
   shift 2
   for member in "$@"; do
-    [ -f "$work/$member" ] && [ ! -L "$work/$member" ] || die "$work/$member is not a regular file."
+    if [ ! -f "$work/$member" ] || [ -L "$work/$member" ]; then die "$work/$member is not a regular file."; fi
     case "$member" in
       package/bin/*.sig | package/LICENSE | package/package.json) chmod 644 "$work/$member" ;;
       package/bin/*) chmod 755 "$work/$member" ;;

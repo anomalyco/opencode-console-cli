@@ -60,4 +60,6 @@ every push to it publishes a dev build. Beta and stable releases are dispatched 
 
 Pull requests squash-merge into `dev`, and every push to `dev` publishes a dev build. `dev` reaches `production`
 through the promotion pull request, merged with a merge commit. Stable and beta are dispatched on `production`; see
-`RELEASING.md`. Changes under `.github/` need a code owner's review.
+`RELEASING.md`. Changes under `.github/` need a code owner's review, which repository admins may skip when merging a
+pull request; required `Checks` and the merge methods apply to everyone, and only admins and maintainers may merge
+into `production`.
