@@ -166,8 +166,8 @@ const Manifest = Schema.Struct({
   /** Set by `setup --keep-provider`: Codex keeps its own sign-in and models, whatever the workspace serves. */
   keepProvider: Schema.optional(Schema.Boolean),
   /**
-   * `shared` while Codex's usage hook reports token counts to the workspace; absent when the workspace doesn't collect
-   * them or Codex uses the gateway.
+   * `shared` while Codex's usage hook reports token counts to the workspace; absent when there's no stats target or
+   * Codex uses the gateway.
    */
   usage: Schema.optional(Schema.Literal("shared")),
 })
@@ -330,7 +330,7 @@ export const refresh = Effect.fn("Codex.refresh")(function* (
         searchOff: search.some((decision) => decision.effect === "deny"),
         providers,
         keepProvider,
-        telemetry: snapshot.telemetry,
+        stats: snapshot.stats,
         watches: WorkspaceSnapshot.watches(snapshot),
         explicit: setup !== undefined,
       }),
@@ -394,7 +394,7 @@ interface Desired {
   readonly searchOff: boolean
   readonly providers: string
   readonly keepProvider: boolean
-  readonly telemetry: WorkspaceSnapshot.Telemetry | undefined
+  readonly stats: WorkspaceSnapshot.Stats | undefined
   readonly watches: boolean
   /** Setup run by the member, which sets every key again; a background sync leaves keys the member changed. */
   readonly explicit: boolean
@@ -412,7 +412,7 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
   const skipped: string[] = []
 
   // The usage report, only while Codex keeps its own sign-in, since the gateway already counts every request it serves.
-  const usage = desired.models || !desired.telemetry ? undefined : ("shared" as const)
+  const usage = desired.models || !desired.stats ? undefined : ("shared" as const)
 
   // Hooks: the policy hook on every tool call and prompt, a config refresh when a session starts, and the usage report
   // after each model response.
@@ -649,8 +649,8 @@ function hookEvents(
   command: readonly string[],
   options: { readonly usage: boolean; readonly watches: boolean },
 ): ReadonlyArray<readonly [string, Group]> {
-  const line = SettingsFile.shellCommand([...command, ...hookArgs])
-  const listen = SettingsFile.shellCommand([...command, ...listenArgs])
+  const line = hookLine([...command, ...hookArgs])
+  const listen = hookLine([...command, ...listenArgs])
   return [
     ["PreToolUse", { matcher: "*", hooks: [{ type: "command", command: line, timeout: 30 }] }],
     ["UserPromptSubmit", { hooks: [{ type: "command", command: line, timeout: 30 }] }],
@@ -670,6 +670,17 @@ function hookEvents(
         ] as const)
       : []),
   ]
+}
+
+/**
+ * A hook's command line. Codex runs hooks in the session's shell, which on Windows is always PowerShell
+ * (`default_user_shell` in `codex-rs/shell-command/src/shell_detect.rs`, run as `-NoProfile -Command <line>`), so there
+ * the program is run with `&`, every word is a literal single-quoted string, and the line exits with the CLI's own code,
+ * which `-Command` would otherwise turn from 2 (a denial) into 1 (a failed hook, which Codex lets through).
+ */
+export function hookLine(argv: readonly string[], platform = process.platform) {
+  if (platform !== "win32") return SettingsFile.shellCommand(argv)
+  return `& ${argv.map((arg) => `'${arg.replaceAll("'", "''")}'`).join(" ")}; exit $LASTEXITCODE`
 }
 
 interface Group {
@@ -709,7 +720,8 @@ function sortedJson(value: unknown): string {
   return JSON.stringify(value)
 }
 
-// Setup's handlers are the ones ending in `hook codex` or `hook codex --listen`, wherever the CLI they run was installed.
+// Setup's handlers are the ones ending in `hook codex` or `hook codex --listen`, wherever the CLI they run was installed
+// and however the line quotes them (`hookLine`; before 0.1.10, Windows lines read `"hook" "codex"`).
 function stripHooks(hooks: Record<string, unknown>) {
   const events = SettingsFile.record(hooks.hooks)
   Object.entries(events).forEach(([event, groups]) => {
@@ -730,7 +742,9 @@ function stripHooks(hooks: Record<string, unknown>) {
 
 function ours(handler: unknown) {
   const command = SettingsFile.record(handler).command
-  return typeof command === "string" && [hookArgs, listenArgs].some((args) => command.endsWith(` ${args.join(" ")}`))
+  if (typeof command !== "string") return false
+  const words = command.replaceAll(/["']/g, "").replace(/; exit \$LASTEXITCODE$/, "")
+  return [hookArgs, listenArgs].some((args) => words.endsWith(` ${args.join(" ")}`))
 }
 
 // `env NAME=value …`, so a command Codex runs with a cleared environment still finds the CLI's sign-in.

@@ -537,6 +537,37 @@ test("Claude Code's PostToolUse hook watches the branch a Bash git push updated,
   ])
 })
 
+test("Claude Code's PostToolUse hook tells Claude why Console refused to watch the branch a git push updated", async () => {
+  const { root } = home()
+  watchingConsole(root, {
+    watches: {
+      create: () =>
+        Response.json(
+          { _tag: "WatchRefused", message: "GitHub isn't available to your account in this workspace." },
+          { status: 403 },
+        ),
+    },
+  })
+  const push = claudeHook("PostToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: "git push origin fix" },
+    tool_response: { stdout: "", stderr: "To github.com:acme/app.git\n   1a2b3c4..5d6e7f8  fix -> fix\n" },
+  })
+
+  const hook = await cli(root, ["hook", "claude-code"], { stdin: push })
+
+  expect([hook.code, JSON.parse(hook.stdout)]).toEqual([
+    0,
+    {
+      hookSpecificOutput: {
+        hookEventName: "PostToolUse",
+        additionalContext:
+          "OpenCode Console can't watch this, so changes to it won't wake this session. Tell the user why: GitHub isn't available to your account in this workspace.",
+      },
+    },
+  ])
+})
+
 describe("setup claude-code", () => {
   const models = () =>
     Response.json({
@@ -1468,10 +1499,10 @@ describe("setup hermes", () => {
 })
 
 describe("usage metadata", () => {
-  // Where the Console has this connector send usage metadata (`GET /api/v2/telemetry`).
-  const telemetry = {
+  // Where the Console has this connector send usage metadata (`GET /api/v2/stats`).
+  const stats = {
     otlpLogsUrl: "https://console.test/console/api/otel/v1/logs",
-    headers: { authorization: "Bearer octel_1" },
+    headers: { authorization: "Bearer ocstats_1" },
   }
   const models = () =>
     Response.json({
@@ -1489,7 +1520,7 @@ describe("usage metadata", () => {
     const { root } = home()
     const console = serve({
       config: () => Response.json({ policies }),
-      telemetry: () => Response.json(telemetry),
+      stats: () => Response.json(stats),
       models,
     })
     const env = isolated(root)
@@ -1503,7 +1534,7 @@ describe("usage metadata", () => {
     expect(setup.stdout).toContain(
       "  Usage      token counts and model names shared with Acme (prompts and code never sent)",
     )
-    expect(headers).toEqual({ code: 0, stdout: '{"authorization":"Bearer octel_1"}\n' })
+    expect(headers).toEqual({ code: 0, stdout: '{"authorization":"Bearer ocstats_1"}\n' })
   })
 
   // Codex's `PostModelRequest` hook input for a completed response.
@@ -1530,7 +1561,7 @@ describe("usage metadata", () => {
     const { root } = home()
     const console = serve({
       config: () => Response.json({ policies }),
-      telemetry: () => Response.json({ ...telemetry, otlpLogsUrl: `${console.url}/api/otel/v1/logs` }),
+      stats: () => Response.json({ ...stats, otlpLogsUrl: `${console.url}/api/otel/v1/logs` }),
     })
     const env = isolated(root)
     await cli(root, ["login", "--server", console.url], { env })
@@ -1548,7 +1579,7 @@ describe("usage metadata", () => {
     expect(hooks.hooks.PostModelRequest[0].hooks[0].async).toBeUndefined()
     expect(result).toEqual({ code: 0, stdout: "" })
     expect(received()).toHaveLength(1)
-    expect(received()[0]?.headers.get("authorization")).toBe("Bearer octel_1")
+    expect(received()[0]?.headers.get("authorization")).toBe("Bearer ocstats_1")
     expect(body).toContain('"conversation.id","value":{"stringValue":"019a6f-session"}')
     expect(body).toContain('"input_token_count","value":{"stringValue":"1200"}')
     expect(body).toContain('"output_token_count","value":{"stringValue":"300"}')
@@ -1559,7 +1590,7 @@ describe("usage metadata", () => {
     const { root } = home()
     const console = serve({
       config: () => Response.json({ policies }),
-      telemetry: () => Response.json({ ...telemetry, otlpLogsUrl: "http://127.0.0.1:9/console/api/otel/v1/logs" }),
+      stats: () => Response.json({ ...stats, otlpLogsUrl: "http://127.0.0.1:9/console/api/otel/v1/logs" }),
     })
     await cli(root, ["login", "--server", console.url])
 
@@ -1600,7 +1631,7 @@ describe("usage metadata", () => {
     const { root } = home()
     const console = serve({
       config: () => Response.json({ policies }),
-      telemetry: () => Response.json({ ...telemetry, headers: { authorization: "Bearer octel_2" } }),
+      stats: () => Response.json({ ...stats, headers: { authorization: "Bearer ocstats_2" } }),
     })
     const store = storeOf(root)
     save(store, signIn(console, Date.now() + 3_600_000, console.url))
@@ -1609,8 +1640,30 @@ describe("usage metadata", () => {
       organization: "Acme",
       fetched: Date.now() - 120_000,
       config: { policies },
-      telemetry,
+      stats,
     })
+
+    const result = await cli(root, ["otel-headers"])
+
+    expect(result.stdout).toBe('{"authorization":"Bearer ocstats_1"}\n')
+  })
+
+  test("otel-headers prints the token a 0.1.8 connector stored as telemetry", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json({ policies }) })
+    const store = storeOf(root)
+    save(store, signIn(console, Date.now() + 3_600_000, console.url))
+    // A snapshot as connectors 0.1.8 and earlier wrote it, with the stats target under its old name.
+    ConsoleStore.write(
+      ConsoleStore.snapshotFile(store),
+      JSON.stringify({
+        owner: JSON.stringify([console.url, "usr_ada", "org_acme"]),
+        organization: "Acme",
+        fetched: Date.now() - 120_000,
+        config: { policies },
+        telemetry: { ...stats, headers: { authorization: "Bearer octel_1" } },
+      }),
+    )
 
     const result = await cli(root, ["otel-headers"])
 
@@ -1621,7 +1674,7 @@ describe("usage metadata", () => {
     const { root } = home()
     const console = serve({
       config: () => Response.json({ policies }),
-      telemetry: () => Response.json({ ...telemetry, headers: { authorization: "Bearer octel_2" } }),
+      stats: () => Response.json({ ...stats, headers: { authorization: "Bearer ocstats_2" } }),
     })
     const store = storeOf(root)
     save(store, signIn(console, Date.now() + 3_600_000, console.url))
@@ -1630,19 +1683,19 @@ describe("usage metadata", () => {
       organization: "Acme",
       fetched: Date.now() - 86_400_000,
       config: { policies },
-      telemetry,
+      stats,
     })
 
     const result = await cli(root, ["otel-headers"])
 
-    expect(result.stdout).toBe('{"authorization":"Bearer octel_2"}\n')
+    expect(result.stdout).toBe('{"authorization":"Bearer ocstats_2"}\n')
   })
 
   test("status says what usage metadata goes to the workspace, in text and JSON", async () => {
     const { root } = home()
     const console = serve({
       config: () => Response.json({ policies }),
-      telemetry: () => Response.json(telemetry),
+      stats: () => Response.json(stats),
       models,
     })
     const env = isolated(root)
@@ -1662,7 +1715,7 @@ describe("usage metadata", () => {
     const { root } = home()
     const console = serve({
       config: () => Response.json({ policies }),
-      telemetry: () => Response.json(telemetry),
+      stats: () => Response.json(stats),
       models,
     })
     const env = { ...isolated(root), OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318" }
@@ -1785,6 +1838,41 @@ describe("Codex event watches", () => {
     expect([result.code, result.stdout]).toEqual([0, ""])
     expect(console.state.created).toEqual([
       { sessionID: "ses_a", target: { _tag: "GitHubBranch", repo: "acme/app", branch: "fix-ci" } },
+    ])
+  })
+
+  test("PostToolUse tells Codex why Console refused to watch the branch a git push updated", async () => {
+    const { root } = home()
+    const console = serve({
+      watches: {
+        create: () =>
+          Response.json(
+            { _tag: "WatchRefused", message: "GitHub isn't available to your account in this workspace." },
+            { status: 403 },
+          ),
+      },
+    })
+    offered(root, console)
+
+    const result = await cli(root, ["hook", "codex"], {
+      stdin: codexHook({
+        hook_event_name: "PostToolUse",
+        tool_name: "Bash",
+        tool_use_id: "call_1",
+        tool_input: { command: "git push -u origin fix-ci" },
+        tool_response: "To github.com:acme/app.git\n * [new branch]      fix-ci -> fix-ci\n",
+      }),
+    })
+
+    expect([result.code, JSON.parse(result.stdout)]).toEqual([
+      0,
+      {
+        hookSpecificOutput: {
+          hookEventName: "PostToolUse",
+          additionalContext:
+            "OpenCode Console can't watch this, so changes to it won't wake this session. Tell the user why: GitHub isn't available to your account in this workspace.",
+        },
+      },
     ])
   })
 

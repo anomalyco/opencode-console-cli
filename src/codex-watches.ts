@@ -63,7 +63,8 @@ export const duringTurn = Effect.fnUntraced(function* (
 
 /**
  * `PostToolUse`, in the background: watches the pull request or branch a shell command's output names for the session,
- * then, when nothing waits for the session's updates during the turn yet, waits for them as `duringTurn` does.
+ * then, when nothing waits for the session's updates during the turn yet, waits for them as `duringTurn` does. When
+ * Console refused the watch, it answers what to tell Codex instead (`ConsoleWatches.watchStarted`).
  */
 export const postToolUse = Effect.fnUntraced(function* (
   store: ConsoleStore.Info,
@@ -78,7 +79,8 @@ export const postToolUse = Effect.fnUntraced(function* (
   const output = typeof event.tool_response === "string" ? event.tool_response : ""
   const target = ConsoleWatches.shellTarget(command, { exit: 0, output })
   if (target === undefined) return undefined
-  yield* ConsoleWatches.create(store, sessionID, target)
+  const created = yield* ConsoleWatches.watchStarted(store, sessionID, target)
+  if (!created.watched) return created.notice
   yield* ConsoleWatches.touchSession(store, sessionID)
   const turn = event.turn_id
   if (!turn || (yield* ConsoleWatches.awaited(store, sessionID))) return undefined

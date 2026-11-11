@@ -23,9 +23,9 @@ const hook = (fields: Record<string, unknown> = {}) =>
     ...fields,
   })
 const now = Date.parse("2026-11-07T12:00:00.000Z")
-const telemetry = {
+const stats = {
   otlpLogsUrl: "https://console.test/console/api/otel/v1/logs",
-  headers: { authorization: "Bearer octel_1" },
+  headers: { authorization: "Bearer ocstats_1" },
 }
 
 test("exports a completed response as the record Codex's own exporter sends, with only its counts, model, conversation and time", () => {
@@ -102,7 +102,7 @@ test("posts the export's body to the workspace's receiver with its headers, foll
   const sent: Array<{ url: string; init: RequestInit }> = []
   const body = '{"resourceLogs":[]}'
 
-  await CodexUsage.post(body, telemetry, {}, async (url, init) => {
+  await CodexUsage.post(body, stats, {}, async (url, init) => {
     sent.push({ url, init })
     return new Response("{}")
   })
@@ -113,7 +113,7 @@ test("posts the export's body to the workspace's receiver with its headers, foll
     [
       "https://console.test/console/api/otel/v1/logs",
       "POST",
-      { authorization: "Bearer octel_1", "content-type": "application/json" },
+      { authorization: "Bearer ocstats_1", "content-type": "application/json" },
       "error",
       body,
     ],
@@ -131,7 +131,7 @@ test("posts nothing while the workspace collects no usage metadata", async () =>
 test("gives up on a receiver that doesn't answer in time", async () => {
   const ended: string[] = []
 
-  await CodexUsage.post("{}", telemetry, { timeout: 20 }, (_url, init) => {
+  await CodexUsage.post("{}", stats, { timeout: 20 }, (_url, init) => {
     return new Promise((_resolve, reject) =>
       init.signal?.addEventListener("abort", () => {
         ended.push("aborted")
@@ -144,7 +144,7 @@ test("gives up on a receiver that doesn't answer in time", async () => {
 })
 
 test("drops a report the receiver can't take rather than fail", async () => {
-  const reported = CodexUsage.post("{}", telemetry, {}, () => Promise.reject(new Error("unreachable")))
+  const reported = CodexUsage.post("{}", stats, {}, () => Promise.reject(new Error("unreachable")))
 
   expect(await reported).toBeUndefined()
 })
@@ -154,14 +154,14 @@ const cliCommand = ["/opt/node/bin/node", "/data/opencode-console/cli/index.js"]
 test("hands the export to a report process of the CLI's own, so the hook returns at once", () => {
   const started: Array<{ readonly command: readonly string[]; readonly body: string }> = []
 
-  CodexUsage.reportInBackground(hook(), telemetry, { version: "0.167.0", now, command: cliCommand }, (command, body) =>
+  CodexUsage.reportInBackground(hook(), stats, { version: "0.167.0", now, command: cliCommand }, (command, body) =>
     started.push({ command, body }),
   )
 
   const sent = started[0]
   expect(sent?.command).toEqual([...cliCommand, "report-codex-usage"])
   // The token reaches the report process through the stored workspace config, never on its command line.
-  expect(sent?.command.join(" ")).not.toContain("octel_1")
+  expect(sent?.command.join(" ")).not.toContain("ocstats_1")
   const attributes = sent && JSON.parse(sent.body).resourceLogs[0].scopeLogs[0].logRecords[0].attributes
   expect(attributes).toContainEqual({ key: "output_token_count", value: { stringValue: "300" } })
 })
@@ -179,7 +179,7 @@ test("starts no report process while the workspace collects no usage metadata", 
 test("starts no report process for a request that doesn't count", () => {
   const processes: Array<readonly string[]> = []
 
-  CodexUsage.reportInBackground(hook({ status: "failed" }), telemetry, { now, command: cliCommand }, (command) =>
+  CodexUsage.reportInBackground(hook({ status: "failed" }), stats, { now, command: cliCommand }, (command) =>
     processes.push([...command]),
   )
 

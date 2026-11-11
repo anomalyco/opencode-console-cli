@@ -40,7 +40,7 @@ const workspaceModels = {
 /**
  * A member of Acme signed in, and an empty home directory for Claude Code. `run` is setup's sync and refresh, and `sync`
  * a later sync's, both against a Console serving `config`, `models`, `instructions` and `skills`, with `bundles` as the
- * skills' files, and `telemetry` as where usage metadata goes. `configure`, `offer`, `serve` and `collect` change what
+ * skills' files, and `stats` as where usage metadata goes. `configure`, `offer`, `serve` and `collect` change what
  * it serves.
  */
 function member(input: {
@@ -50,7 +50,7 @@ function member(input: {
   readonly skills?: readonly unknown[]
   readonly bundles?: Record<string, unknown>
   readonly blobs?: Record<string, Uint8Array>
-  readonly telemetry?: unknown
+  readonly stats?: unknown
   /** Whether the config answer says the member may keep event watches (`x-opencode-event-watches: 1`). */
   readonly watches?: boolean
 }) {
@@ -59,7 +59,7 @@ function member(input: {
     models: input.models ?? workspaceModels,
     instructions: input.instructions ?? [],
     skills: input.skills ?? [],
-    telemetry: input.telemetry,
+    stats: input.stats,
     watches: input.watches ?? false,
   }
   const console = fakeConsole({
@@ -67,10 +67,8 @@ function member(input: {
     models: () => Response.json(served.models),
     instructions: () => Response.json({ instructions: served.instructions }),
     skills: () => Response.json({ skills: served.skills }),
-    telemetry: () =>
-      served.telemetry === undefined
-        ? Response.json({ _tag: "NotFound" }, { status: 404 })
-        : Response.json(served.telemetry),
+    stats: () =>
+      served.stats === undefined ? Response.json({ _tag: "NotFound" }, { status: 404 }) : Response.json(served.stats),
     ...(input.bundles === undefined ? {} : { bundles: input.bundles }),
     ...(input.blobs === undefined ? {} : { blobs: input.blobs }),
   })
@@ -99,8 +97,8 @@ function member(input: {
       served.watches = watches
     },
     /** Where the Console has the member send usage metadata; undefined answers 404, collecting none. */
-    collect: (telemetry: unknown) => {
-      served.telemetry = telemetry
+    collect: (stats: unknown) => {
+      served.stats = stats
     },
     /** Setup, with `--keep-provider` when `keepProvider`, from a shell with `shell` as its environment. */
     run: (options: { readonly keepProvider?: boolean; readonly shell?: Record<string, string> } = {}) =>
@@ -871,14 +869,14 @@ test("setup without --keep-provider moves to the gateway, and with it gives the 
   })
 })
 
-// Where the Console has this connector send usage metadata (`GET /api/v2/telemetry`).
-const telemetry = {
+// Where the Console has this connector send usage metadata (`GET /api/v2/stats`).
+const stats = {
   otlpLogsUrl: "https://console.test/console/api/otel/v1/logs",
-  headers: { authorization: "Bearer octel_1" },
+  headers: { authorization: "Bearer ocstats_1" },
 }
 
 test("sends usage metadata to the workspace while Claude Code keeps its own sign-in", async () => {
-  const claude = member({ telemetry })
+  const claude = member({ stats })
 
   const applied = await claude.run({ keepProvider: true })
 
@@ -900,7 +898,7 @@ test("sends usage metadata to the workspace while Claude Code keeps its own sign
 })
 
 test("keeps prompts out of the usage export though the member turned prompt logging on, and gives it back after", async () => {
-  const claude = member({ config: {}, telemetry })
+  const claude = member({ config: {}, stats })
   write(claude.paths.settings, { env: { OTEL_LOG_USER_PROMPTS: "1" } })
   await claude.run({ keepProvider: true })
   const exporting = json(claude.paths.settings).env.OTEL_LOG_USER_PROMPTS
@@ -912,7 +910,7 @@ test("keeps prompts out of the usage export though the member turned prompt logg
 })
 
 test("sends no usage metadata from a Claude Code that uses the gateway, which counts its requests already", async () => {
-  const claude = member({ telemetry })
+  const claude = member({ stats })
 
   const applied = await claude.run()
 
@@ -925,7 +923,7 @@ test("sends no usage metadata from a Claude Code that uses the gateway, which co
 })
 
 test("keeps an OpenTelemetry endpoint the member set in Claude Code's settings, sending nothing to the workspace", async () => {
-  const claude = member({ config: {}, telemetry })
+  const claude = member({ config: {}, stats })
   const before = { env: { CLAUDE_CODE_ENABLE_TELEMETRY: "1", OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel.acme.test" } }
   write(claude.paths.settings, before)
 
@@ -936,7 +934,7 @@ test("keeps an OpenTelemetry endpoint the member set in Claude Code's settings, 
 })
 
 test("keeps an OpenTelemetry headers helper the member set, sending nothing to the workspace", async () => {
-  const claude = member({ config: {}, telemetry })
+  const claude = member({ config: {}, stats })
   write(claude.paths.settings, { otelHeadersHelper: "vault otel-token" })
 
   await claude.run({ keepProvider: true })
@@ -949,7 +947,7 @@ test("keeps an OpenTelemetry headers helper the member set, sending nothing to t
 })
 
 test("keeps an OpenTelemetry endpoint the member set in their shell, sending nothing to the workspace", async () => {
-  const claude = member({ config: {}, telemetry })
+  const claude = member({ config: {}, stats })
 
   const applied = await claude.run({
     keepProvider: true,
@@ -960,7 +958,7 @@ test("keeps an OpenTelemetry endpoint the member set in their shell, sending not
 })
 
 test("keeps sending usage metadata when a sync runs from Claude Code's hook, which passes on what setup wrote", async () => {
-  const claude = member({ config: {}, telemetry })
+  const claude = member({ config: {}, stats })
   await claude.run({ keepProvider: true })
 
   const applied = await claude.sync({
@@ -976,7 +974,7 @@ test("keeps sending usage metadata when a sync runs from Claude Code's hook, whi
 })
 
 test("stops sending usage metadata and restores the member's values once the workspace stops collecting it", async () => {
-  const claude = member({ config: {}, telemetry })
+  const claude = member({ config: {}, stats })
   write(claude.paths.settings, { env: { CLAUDE_CODE_ENABLE_TELEMETRY: "0" } })
   await claude.run({ keepProvider: true })
 
