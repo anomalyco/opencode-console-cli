@@ -19,9 +19,11 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Console CLI {
 #   environment, secrets or id-token, and upload their artifacts with a SHA256SUMS whose digest they output.
 # - Every later job checks out only .github/release/, verifies each artifact against the digest of the job that made it,
 #   and runs those scripts on the artifacts as data. It never executes repository code.
-# - Only stable and beta sign, in environment signing (production only), which holds the Apple, Azure and Linux signing
-#   values; they fail when any is missing. Dev builds ship unsigned, so no push to dev can reach a signing key. Each
-#   signing job reads its values in one "Load signing secrets" step, the only step a move to a secrets manager changes.
+# - Only stable and beta sign, in environment signing (production only); they fail when any value is missing. Dev
+#   builds ship unsigned, so no push to dev can reach a signing key. sign-macos reads the Apple certificate and notary
+#   key from AWS Secrets Manager, signed in by OIDC as environment signing, and the notary key's IDs from variables.
+#   sign-windows and sign-linux read the Azure and Linux values from environment signing's secrets, each in one "Load
+#   signing secrets" step.
 # - The release service runs in environment release (dev and production), which holds no secrets: the service admits
 #   it by OIDC. npm runs in environment npm (production only, no secrets), which every package's trusted publishing
 #   names, so no dev run can mint a token npm accepts.
@@ -210,7 +212,8 @@ jobs:
   # ---- Sign: environment release; only .github/release/ is checked out ----------------------------------------------
 
   # Developer ID, hardened runtime and notarization for the three macOS binaries, on stable and beta. A check run has no
-  # environment, so no secrets: it signs ad hoc, so the rest of the release still runs on its output.
+  # environment and never signs in to AWS, so no secrets: it signs ad hoc, so the rest of the release still runs on its
+  # output.
   sign-macos:
     name: Sign and notarize the macOS binaries
     needs: [plan, build-binaries]
@@ -220,27 +223,35 @@ jobs:
     environment: ${{ needs.plan.outputs.signed == 'true' && 'signing' || '' }}
     permissions:
       contents: read
-      id-token: write # for a secrets manager's OIDC sign-in
+      id-token: write # the AWS sign-in
     env:
       CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
       CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+      # The notary key's IDs aren't secret, so they're variables.
+      CONSOLE_NOTARY_KEY_ID: ${{ needs.plan.outputs.signed == 'true' && vars.APPLE_NOTARY_KEY_ID || '' }}
+      CONSOLE_NOTARY_ISSUER: ${{ needs.plan.outputs.signed == 'true' && vars.APPLE_NOTARY_ISSUER_ID || '' }}
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
     steps:
       - *checkout-release
-      # The only step that reads signing values. Moving them to a secrets manager replaces this step with its OIDC
-      # sign-in and fetch actions, which leave the same names in the job's environment.
-      - name: Load signing secrets
+      # The Developer ID certificate (a base64 .p12 with no password) and the notary key are shared with
+      # anomalyco/opencode in AWS Secrets Manager, read by OIDC as environment signing (RELEASING.md has the subject the
+      # role trusts). The fetch action masks every value, each line included, before it reaches the job's environment.
+      - name: Configure AWS credentials
         if: needs.plan.outputs.signed == 'true'
-        env:
-          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
-          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
-          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
-          CONSOLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
-          CONSOLE_NOTARY_ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
-        run: |
-          bash .github/release/export-env.sh APPLE_SIGNING_CERTIFICATE APPLE_SIGNING_CERTIFICATE_PASSWORD \
-            APPLE_NOTARY_KEY CONSOLE_NOTARY_KEY_ID CONSOLE_NOTARY_ISSUER
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::604439173067:role/github/opencode-console-cli-signing
+          role-session-name: opencode-console-cli-${{ github.run_id }}
+          aws-region: us-east-1
+      - name: Read signing secrets
+        if: needs.plan.outputs.signed == 'true'
+        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
+        with:
+          secret-ids: |
+            APPLE_SIGNING_CERTIFICATE,shared/APPLE_SIGNING_CERTIFICATE
+            APPLE_NOTARY_KEY,shared/APPLE_NOTARY_KEY
+          parse-json-secrets: false
       - id: credentials
         name: Require the Apple values
         env:
@@ -254,7 +265,7 @@ jobs:
             echo "available=false" >> "$GITHUB_OUTPUT"
             echo "::notice::Check run: macOS binaries are signed ad hoc and not notarized." | tee -a "$GITHUB_STEP_SUMMARY"
           elif [ -n "$missing" ]; then
-            echo "::error::Stable and beta releases need signed macOS binaries, and environment signing lacks:$missing."
+            echo "::error::Stable and beta releases need signed macOS binaries, and this run lacks:$missing."
             exit 1
           else
             echo "available=true" >> "$GITHUB_OUTPUT"
@@ -299,7 +310,7 @@ jobs:
       digest: ${{ steps.upload.outputs.digest }}
     steps:
       - *checkout-release
-      # The only step that reads signing values; see sign-macos.
+      # The only step that reads signing values, from environment signing's secrets.
       - name: Load signing secrets
         if: needs.plan.outputs.signed == 'true'
         env:
@@ -401,7 +412,7 @@ jobs:
       digest: ${{ steps.upload.outputs.digest }}
     steps:
       - *checkout-release
-      # The only step that reads signing values; see sign-macos.
+      # The only step that reads signing values, from environment signing's secrets.
       - name: Load signing secrets
         if: needs.plan.outputs.signed == 'true'
         env:

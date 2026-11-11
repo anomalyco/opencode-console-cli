@@ -3,8 +3,8 @@
 # Store Connect API key for notarytool there. Prints nothing secret. Appends CONSOLE_KEYCHAIN, CONSOLE_SIGNING_IDENTITY
 # and CONSOLE_NOTARY_KEY to $GITHUB_ENV. Ported from anomalyco/hex (.github/release/macos-credentials.sh, a65a5e37).
 #
-# Environment: APPLE_SIGNING_CERTIFICATE (a base64 .p12), APPLE_SIGNING_CERTIFICATE_PASSWORD (optional; the .p12 may
-# have none), APPLE_NOTARY_KEY (the .p8, as PEM or base64), CONSOLE_TEAM_ID.
+# Environment: APPLE_SIGNING_CERTIFICATE (a base64 .p12 with no password), APPLE_NOTARY_KEY (the .p8, as PEM or
+# base64), CONSOLE_TEAM_ID.
 . "$(dirname "$0")/lib.sh"
 
 dir=$1
@@ -22,13 +22,8 @@ password=$(uuidgen)
 security create-keychain -p "$password" "$keychain"
 security set-keychain-settings -lut 21600 "$keychain"
 security unlock-keychain -p "$password" "$keychain"
-if ! security import "$certificate" -k "$keychain" -f pkcs12 -P "${APPLE_SIGNING_CERTIFICATE_PASSWORD:-}" \
-  -T /usr/bin/codesign -T /usr/bin/security > /dev/null 2>&1; then
-  if [ -z "${APPLE_SIGNING_CERTIFICATE_PASSWORD:-}" ]; then
-    die "APPLE_SIGNING_CERTIFICATE did not import without a password; it needs APPLE_SIGNING_CERTIFICATE_PASSWORD."
-  fi
-  die "APPLE_SIGNING_CERTIFICATE did not import with APPLE_SIGNING_CERTIFICATE_PASSWORD."
-fi
+security import "$certificate" -k "$keychain" -f pkcs12 -P "" -T /usr/bin/codesign -T /usr/bin/security > /dev/null 2>&1 ||
+  die "APPLE_SIGNING_CERTIFICATE did not import as a .p12 with no password."
 rm -f "$certificate"
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" > /dev/null
 # codesign finds identities only in the search list.
