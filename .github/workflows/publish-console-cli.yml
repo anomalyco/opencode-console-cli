@@ -19,11 +19,12 @@ run-name: "${{ github.event_name == 'workflow_dispatch' && format('Console CLI {
 #   environment, secrets or id-token, and upload their artifacts with a SHA256SUMS whose digest they output.
 # - Every later job checks out only .github/release/, verifies each artifact against the digest of the job that made it,
 #   and runs those scripts on the artifacts as data. It never executes repository code.
-# - Only stable and beta sign, in environment signing (production only); they fail when any value is missing. Dev
-#   builds ship unsigned, so no push to dev can reach a signing key. sign-macos reads the Apple certificate and notary
-#   key from AWS Secrets Manager, signed in by OIDC as environment signing, and the notary key's IDs from variables.
-#   sign-windows and sign-linux read the Azure and Linux values from environment signing's secrets, each in one "Load
-#   signing secrets" step.
+# - Only stable and beta sign; they fail when any value is missing. Dev builds ship unsigned, so no push to dev can
+#   reach a signing key. sign-macos runs in environment signing-macos (production only), signs in to AWS by OIDC as
+#   that environment and reads the Apple certificate and notary key from Secrets Manager, and the notary key's IDs from
+#   its variables. Its own environment keeps the org-wide Apple keys away from the other signing jobs' dependencies.
+#   sign-windows and sign-linux run in environment signing (production only) and read the Azure and Linux values from
+#   its secrets, each in one "Load signing secrets" step.
 # - The release service runs in environment release (dev and production), which holds no secrets: the service admits
 #   it by OIDC. npm runs in environment npm (production only, no secrets), which every package's trusted publishing
 #   names, so no dev run can mint a token npm accepts.
@@ -220,14 +221,14 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 60
     if: needs.plan.outputs.signed == 'true' || needs.plan.outputs.mode == 'check'
-    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing' || '' }}
+    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing-macos' || '' }}
     permissions:
       contents: read
       id-token: write # the AWS sign-in
     env:
       CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
       CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-      # The notary key's IDs aren't secret, so they're variables.
+      # The notary key's IDs aren't secret, so they're environment signing-macos's variables.
       CONSOLE_NOTARY_KEY_ID: ${{ needs.plan.outputs.signed == 'true' && vars.APPLE_NOTARY_KEY_ID || '' }}
       CONSOLE_NOTARY_ISSUER: ${{ needs.plan.outputs.signed == 'true' && vars.APPLE_NOTARY_ISSUER_ID || '' }}
     outputs:
@@ -235,8 +236,9 @@ jobs:
     steps:
       - *checkout-release
       # The Developer ID certificate (a base64 .p12 with no password) and the notary key are shared with
-      # anomalyco/opencode in AWS Secrets Manager, read by OIDC as environment signing (RELEASING.md has the subject the
-      # role trusts). The fetch action masks every value, each line included, before it reaches the job's environment.
+      # anomalyco/opencode in AWS Secrets Manager. The role trusts only this environment's OIDC subject,
+      # repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:signing-macos. The fetch action masks every
+      # value, each line included, before it reaches the job's environment.
       - name: Configure AWS credentials
         if: needs.plan.outputs.signed == 'true'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0

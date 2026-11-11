@@ -52,14 +52,16 @@ back. On a member's machine, a build whose hooks crash three times in a row also
   environment, secrets or OIDC token, and upload their output with a `SHA256SUMS` whose digest they report.
 - Every later job checks out only `.github/release/`, checks each artifact against the digest of the job that made it,
   and treats artifacts as data. None of them runs repository code.
-- `sign-macos`, `sign-windows` and `sign-linux` run in environment `signing` (`production` only) for beta and stable.
-  Dev builds ship unsigned, and check runs never sign in anywhere, so no push to `dev` reaches a signing key. The values
-  live in:
+- For beta and stable, `sign-macos` runs in environment `signing-macos`, and `sign-windows` and `sign-linux` in
+  environment `signing`, both `production` only. `sign-macos` has its own environment because AWS trusts it with
+  Apple keys the whole organization shares, which a compromised dependency of the Windows or Linux signing steps
+  mustn't reach. Dev builds ship unsigned, and check runs never sign in anywhere, so no push to `dev` reaches a signing
+  key. The values live in:
 
   | Value | Where |
   | --- | --- |
   | `APPLE_SIGNING_CERTIFICATE` (a base64 .p12 with no password), `APPLE_NOTARY_KEY` | AWS Secrets Manager, `shared/APPLE_SIGNING_CERTIFICATE` and `shared/APPLE_NOTARY_KEY`, shared with `anomalyco/opencode` |
-  | `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` | repository or `signing` environment variables |
+  | `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` | environment `signing-macos` variables |
   | `AZURE_*` | environment `signing` secrets |
   | `CONSOLE_CLI_RELEASE_SIGNING_KEY` | environment `signing` secret |
 
@@ -67,12 +69,14 @@ back. On a member's machine, a build whose hooks crash three times in a row also
   signing secrets`, the others' `Load signing secrets`.
 - `sign-macos` signs in to AWS as role `arn:aws:iam::604439173067:role/github/opencode-console-cli-signing`, whose
   trust policy must admit issuer `https://token.actions.githubusercontent.com`, audience `sts.amazonaws.com` and
-  subject `repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:signing`.
+  subject `repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:signing-macos`, and no other.
   `aws-actions/aws-secretsmanager-get-secrets` masks each value, every line of it included, before a later step can
   print it; a hand-written `aws secretsmanager get-secret-value` step wouldn't, and would need `::add-mask::`.
 - Azure signs Windows binaries for a federated credential with issuer `https://token.actions.githubusercontent.com`,
-  audience `api://AzureADTokenExchange` and the same subject. This repository uses immutable OIDC subjects, which name
-  the owner's and repository's IDs, so the AWS role and the Azure credential survive a rename but not a recreated repo.
+  audience `api://AzureADTokenExchange` and subject
+  `repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:signing`. This repository uses immutable OIDC
+  subjects, which name the owner's and repository's IDs, so the AWS role and the Azure credential survive a rename but
+  not a recreated repo.
 - `reserve-tag` claims `refs/tags/v<version>` at the run's commit before a stable release publishes anything, and fails
   if the tag already points elsewhere. `finish` releases that tag with `gh release create --verify-tag`.
 - Jobs that publish download the release service's client and check it against `.github/release/client.sh.sha256`

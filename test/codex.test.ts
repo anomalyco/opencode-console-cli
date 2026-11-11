@@ -353,6 +353,15 @@ const powershellHook =
   "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\Users\\Ada O''Brien\\opencode-console\\cli\\index.js' 'hook' 'codex'; exit $LASTEXITCODE"
 
 test("writes Windows hook lines PowerShell runs as one program, keeping the CLI's exit code", () => {
+  // PowerShell reads curly quotes as single quotes too, so each is doubled, as itself.
+  expect(
+    Codex.hookLine(
+      ["C:\\Users\\O\u2019Brien\\bin\\opencode-console.exe", "\u2018a\u201Ab\u201B", "hook", "codex"],
+      "win32",
+    ),
+  ).toBe(
+    "& 'C:\\Users\\O\u2019\u2019Brien\\bin\\opencode-console.exe' '\u2018\u2018a\u201A\u201Ab\u201B\u201B' 'hook' 'codex'; exit $LASTEXITCODE",
+  )
   expect(
     Codex.hookLine(
       [

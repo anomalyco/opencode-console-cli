@@ -604,7 +604,7 @@ async function setup() {
   const { ConsoleClient } = await import("./console-client")
   // Asked first, so the very first config fetch names the agent to the Console, by the product token it sends itself.
   // Hermes's version can carry git build metadata (`0.23.0+12.ge075441`), which its own requests leave out.
-  const found = await agentVersion(pi ? "pi" : codex ? "codex" : dsh ? "dsh" : hermes ? "hermes" : "claude")
+  const found = await CliInstall.agentVersion(pi ? "pi" : codex ? "codex" : dsh ? "dsh" : hermes ? "hermes" : "claude")
   const agent = hermes ? found?.replace(/\+.*$/, "") : found
   if (agent)
     harness = pi
@@ -1462,17 +1462,6 @@ async function refuse(reason: string) {
   process.stdout.write(answer.stdout)
   process.stderr.write(answer.stderr)
   return answer.code
-}
-
-// A coding agent's version, which names it to the Console, or undefined when it isn't installed.
-async function agentVersion(binary: string) {
-  const { exec } = await import("node:child_process")
-  return new Promise<string | undefined>((resolve) =>
-    // Through the shell, since npm installs an agent on Windows as a `.cmd` shim, which only a shell can start.
-    exec(`${binary} --version`, { timeout: 10_000 }, (error, stdout) =>
-      resolve(error ? undefined : stdout.match(/\d+\.\d+\.\d+\S*/)?.[0]),
-    ),
-  )
 }
 
 /** Answers a check with a denial: the decision on stdout, exit code 2. */

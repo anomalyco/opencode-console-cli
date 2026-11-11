@@ -680,7 +680,8 @@ function hookEvents(
  */
 export function hookLine(argv: readonly string[], platform = process.platform) {
   if (platform !== "win32") return SettingsFile.shellCommand(argv)
-  return `& ${argv.map((arg) => `'${arg.replaceAll("'", "''")}'`).join(" ")}; exit $LASTEXITCODE`
+  // PowerShell ends a single-quoted string at any of these, curly ones included, and reads one doubled as itself.
+  return `& ${argv.map((arg) => `'${arg.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`).join(" ")}; exit $LASTEXITCODE`
 }
 
 interface Group {
