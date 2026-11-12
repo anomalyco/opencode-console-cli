@@ -369,3 +369,25 @@ test("leaves out of the receipt an archive SHA-256 that isn't one, so the instal
 
   expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel: "stable" })
 })
+
+test("asks a Windows agent's npm shim its version through cmd.exe, which mustn't look in the project first", () => {
+  expect(CliInstall.versionProbe("codex", "win32", { PATH: "C:\\npm" })).toEqual({
+    file: "codex --version",
+    args: [],
+    options: { shell: true, env: { PATH: "C:\\npm", NoDefaultCurrentDirectoryInExePath: "1" } },
+  })
+  expect(CliInstall.versionProbe("codex", "linux", { PATH: "/usr/bin" })).toEqual({
+    file: "codex",
+    args: ["--version"],
+    options: { env: { PATH: "/usr/bin" } },
+  })
+})
+
+test("reads an agent's version without a shell, or none when it isn't installed", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "opencode-console-agent-"))
+  roots.push(root)
+  const agent = path.join(root, "codex; echo 9.9.9")
+  writeFileSync(agent, "#!/bin/sh\necho 'codex-cli 0.167.0'\n", { mode: 0o755 })
+  expect(await CliInstall.agentVersion(agent)).toBe("0.167.0")
+  expect(await CliInstall.agentVersion(path.join(root, "missing"))).toBeUndefined()
+})

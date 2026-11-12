@@ -1,6 +1,6 @@
 export * as CliInstall from "./install"
 
-import { spawnSync } from "node:child_process"
+import { execFile, spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import {
   chmodSync,
@@ -385,6 +385,31 @@ export function uninstall(store: ConsoleStore.Info) {
 
 function writeReceipt(directory: string, value: Receipt) {
   ConsoleStore.write(receiptFile(directory), `${JSON.stringify(value, null, 2)}\n`)
+}
+
+/** A coding agent's version, which names it to the Console, or undefined when it isn't installed. */
+export function agentVersion(binary: string) {
+  const probe = versionProbe(binary)
+  return new Promise<string | undefined>((resolve) =>
+    execFile(probe.file, probe.args, { ...probe.options, timeout: 10_000, windowsHide: true }, (error, stdout) =>
+      resolve(error ? undefined : stdout.match(/\d+\.\d+\.\d+\S*/)?.[0]),
+    ),
+  )
+}
+
+/**
+ * How `agentVersion` runs `<binary> --version`. On Windows that takes a shell, since npm installs agents as `.cmd`
+ * shims, and `cmd.exe` looks for a program in the current directory before `PATH` unless
+ * `NoDefaultCurrentDirectoryInExePath` is set, so setup in a project holding its own `codex.cmd` would run that.
+ */
+export function versionProbe(
+  binary: string,
+  platform = process.platform,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  if (platform !== "win32") return { file: binary, args: ["--version"], options: { env } }
+  const shimEnv: Record<string, string | undefined> = { ...env, NoDefaultCurrentDirectoryInExePath: "1" }
+  return { file: `${binary} --version`, args: [], options: { shell: true, env: shimEnv } }
 }
 
 // What a command printed, either stream and whatever its exit code: musl's `ldd --version` says so on stderr and exits 1.

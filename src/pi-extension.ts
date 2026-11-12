@@ -378,7 +378,8 @@ function watching(pi: ExtensionAPI, state: InProcess.Session) {
     },
     /**
      * Watches what a finished shell command started, such as the pull request `gh pr create` printed or the branch
-     * `git push` updated. It runs beside the tool call, which never waits on Console; a failure only skips the watch.
+     * `git push` updated. It runs beside the tool call, which never waits on Console; a failure only skips the watch,
+     * and a refusal tells the agent why (`ConsoleWatches.watchStarted`).
      */
     shell: (ctx: ExtensionContext, command: string, result: unknown) => {
       if (!current.registered) return
@@ -386,7 +387,14 @@ function watching(pi: ExtensionAPI, state: InProcess.Session) {
       const target = shell && ConsoleWatches.shellTarget(command, { exit: shell.exit_code, output: shell.output })
       if (target === undefined) return
       void state
-        .run(ConsoleWatches.create(state.store, ctx.sessionManager.getSessionId(), target))
+        .run(ConsoleWatches.watchStarted(state.store, ctx.sessionManager.getSessionId(), target))
+        .then((created) => {
+          if (created.notice !== undefined)
+            pi.sendMessage(
+              { customType: WATCH_MESSAGE, content: created.notice, display: true },
+              { deliverAs: "steer" },
+            )
+        })
         .catch(() => undefined)
     },
   }

@@ -94,6 +94,33 @@ test("stores the instructions and skills the Console serves the member beside th
   ])
 })
 
+test("reads instructions and skills only while the config answer says the member has them, and has none otherwise", async () => {
+  const served = { current: true }
+  const console = fakeConsole({
+    instructionsSkills: () => served.current,
+    instructions: () => Response.json({ instructions: [{ id: "ins_1", name: "Style", content: "Use tabs." }] }),
+    skills: () => Response.json({ skills: [{ slug: "deploy", version: "skl_1:1" }] }),
+  })
+  const store = signedIn(console)
+  const listReads = () =>
+    console.state.requests.filter((request) => /\/api\/v2\/(instructions|skills)$/.test(new URL(request.url).pathname))
+      .length
+
+  const result = await run(
+    Effect.gen(function* () {
+      yield* sync(console, store)
+      const readsWithHeader = listReads()
+      served.current = false
+      const without = yield* sync(console, store, { force: true })
+      return { readsWithHeader, readsWithout: listReads() - readsWithHeader, without }
+    }),
+  )
+
+  expect(result.readsWithHeader).toBe(2)
+  expect(result.readsWithout).toBe(0)
+  expect([result.without.snapshot?.instructions, result.without.snapshot?.skills]).toEqual([[], []])
+})
+
 test("leaves out a skill whose slug can't name a folder", async () => {
   const console = fakeConsole({
     skills: () =>
@@ -167,17 +194,16 @@ test("keeps the last instructions and skills when they fail to load, and still t
   ])
 })
 
-// Where the Console has the member send usage metadata (`GET /api/v2/telemetry`).
-const telemetry = {
+// Where the Console has the member send usage metadata (`GET /api/v2/stats`).
+const stats = {
   otlpLogsUrl: "https://console.test/console/api/otel/v1/logs",
-  headers: { authorization: "Bearer octel_1" },
+  headers: { authorization: "Bearer ocstats_1" },
 }
 
 test("stores where usage metadata goes, and clears it once the Console answers 404, collecting none", async () => {
   const collecting = { current: true }
   const console = fakeConsole({
-    telemetry: () =>
-      collecting.current ? Response.json(telemetry) : Response.json({ _tag: "NotFound" }, { status: 404 }),
+    stats: () => (collecting.current ? Response.json(stats) : Response.json({ _tag: "NotFound" }, { status: 404 })),
   })
   const store = signedIn(console)
 
@@ -189,14 +215,36 @@ test("stores where usage metadata goes, and clears it once the Console answers 4
     }),
   )
 
-  expect(first.snapshot?.telemetry).toEqual(telemetry)
-  expect([second.error, WorkspaceSnapshot.read(store)?.telemetry]).toEqual([undefined, undefined])
+  expect(first.snapshot?.stats).toEqual(stats)
+  expect([second.error, WorkspaceSnapshot.read(store)?.stats]).toEqual([undefined, undefined])
+})
+
+test("stores where usage metadata goes under telemetry too, and clears it there, for a 0.1.8 connector's hooks", async () => {
+  const collecting = { current: true }
+  const console = fakeConsole({
+    stats: () => (collecting.current ? Response.json(stats) : Response.json({ _tag: "NotFound" }, { status: 404 })),
+  })
+  const store = signedIn(console)
+  // What a 0.1.8 connector reads from the snapshot file it shares with this one.
+  const stored = () => JSON.parse(ConsoleStore.read(ConsoleStore.snapshotFile(store)) ?? "{}").telemetry
+
+  const [first, second] = await run(
+    Effect.gen(function* () {
+      yield* sync(console, store)
+      const first = stored()
+      collecting.current = false
+      yield* sync(console, store, { force: true })
+      return [first, stored()]
+    }),
+  )
+
+  expect([first, second]).toEqual([stats, undefined])
 })
 
 test("keeps where usage metadata goes when it fails to load", async () => {
   const failing = { current: false }
   const console = fakeConsole({
-    telemetry: () => (failing.current ? new Response("unavailable", { status: 503 }) : Response.json(telemetry)),
+    stats: () => (failing.current ? new Response("unavailable", { status: 503 }) : Response.json(stats)),
   })
   const store = signedIn(console)
 
@@ -208,7 +256,7 @@ test("keeps where usage metadata goes when it fails to load", async () => {
     }),
   )
 
-  expect(result.snapshot?.telemetry).toEqual(telemetry)
+  expect(result.snapshot?.stats).toEqual(stats)
 })
 
 test("names the CLI and the harness to the Console", async () => {

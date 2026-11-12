@@ -58,12 +58,12 @@ npx @opencode/console setup hermes --keep-provider
 ```
 
 Claude Code or Codex keeps your own sign-in and models, and still gets the workspace's policies, plus any MCP servers,
-skills and instructions the workspace has. If the workspace counts usage from members' own subscriptions, Claude Code
-and Codex send Console token counts and model names, never prompts or code. Codex reports them from a hook after each
-model response; it needs Codex 0.164.0 or later. If you've already set an OpenTelemetry endpoint for Claude Code, setup
-leaves it in place and Claude Code sends Console no usage. `npx @opencode/console status` shows which applies. Hermes
-keeps its own providers and models the same way, and sends no usage. Run setup without `--keep-provider` to use the
-workspace's models again.
+skills and instructions the workspace has. They then report each request's token counts and model to the workspace,
+which counts them in its usage and the Leaderboard's Tokens ranking at $0. They never send prompts or code. Codex
+reports them from a hook after each model response; it needs Codex 0.164.0 or later. An OpenTelemetry endpoint you
+already set for Claude Code stays yours, and Claude Code reports nothing to the workspace.
+`npx @opencode/console status` shows which applies. Hermes keeps its own providers and models the same way, and sends
+no usage. Run setup without `--keep-provider` to use the workspace's models again.
 
 ## Set up DeepSeek Harness
 
