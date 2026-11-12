@@ -16,6 +16,11 @@ import { version } from "../package.json" with { type: "json" }
 import { CliInstall } from "../src/install"
 import { removeStores, temporaryStore } from "./support/console"
 
+// A release stamps package.json before its tests run, so a dev or beta build's own version names its channel.
+const channel = CliInstall.channelOf(version)
+const other = channel === "dev" ? "stable" : "dev"
+const otherVersion = other === "dev" ? "0.1.8-dev.4" : "0.1.8"
+
 const roots: string[] = []
 afterEach(() => {
   removeStores()
@@ -147,7 +152,7 @@ test("leaves a receipt for the npm copy, naming the Node that runs it, so it can
   expect(CliInstall.receipt(store)).toEqual({
     method: "npm-bundle",
     version,
-    channel: "stable",
+    channel,
     node: "/opt/node/bin/node",
   })
 })
@@ -160,7 +165,7 @@ test("leaves a receipt for a binary, with the release archive it came from", () 
 
   CliInstall.install(store, { execPath: path.join(root, "opencode-console"), sha256: "a".repeat(64) })
 
-  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel: "stable", sha256: "a".repeat(64) })
+  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel, sha256: "a".repeat(64) })
 })
 
 test("drops the build kept for a rollback when setup moves the install to another channel", () => {
@@ -170,18 +175,15 @@ test("drops the build kept for a rollback when setup moves the install to anothe
   writeFileSync(path.join(root, "opencode-console"), "binary")
   const kept = CliInstall.previousDirectory(store)
   mkdirSync(kept, { recursive: true })
-  writeFileSync(path.join(kept, "opencode-console"), "a dev build")
-  const dev = { method: "direct", version: `${version}-dev.4`, channel: "dev" }
-  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(dev))
+  writeFileSync(path.join(kept, "opencode-console"), "a build from the other channel")
+  const previous = { method: "direct", version: otherVersion, channel: other }
+  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(previous))
   mkdirSync(CliInstall.directory(store), { recursive: true })
-  writeFileSync(
-    CliInstall.receiptFile(CliInstall.directory(store)),
-    JSON.stringify({ ...dev, version: `${version}-dev.5` }),
-  )
+  writeFileSync(CliInstall.receiptFile(CliInstall.directory(store)), JSON.stringify(previous))
 
   CliInstall.install(store, { execPath: path.join(root, "opencode-console") })
 
-  expect(CliInstall.receipt(store)).toMatchObject({ channel: "stable" })
+  expect(CliInstall.receipt(store)).toMatchObject({ channel })
   expect(existsSync(kept)).toBe(false)
 })
 
@@ -192,14 +194,14 @@ test("keeps the build kept for a rollback when setup runs again on the same chan
   writeFileSync(path.join(root, "opencode-console"), "binary")
   const kept = CliInstall.previousDirectory(store)
   mkdirSync(kept, { recursive: true })
-  const stable = { method: "direct", version: "0.1.8", channel: "stable" }
-  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(stable))
+  const same = { method: "direct", version: channel === "dev" ? "0.1.8-dev.4" : "0.1.8", channel }
+  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(same))
   mkdirSync(CliInstall.directory(store), { recursive: true })
-  writeFileSync(CliInstall.receiptFile(CliInstall.directory(store)), JSON.stringify({ ...stable, version }))
+  writeFileSync(CliInstall.receiptFile(CliInstall.directory(store)), JSON.stringify({ ...same, version }))
 
   CliInstall.install(store, { execPath: path.join(root, "opencode-console") })
 
-  expect(CliInstall.receipt(store, kept)).toMatchObject(stable)
+  expect(CliInstall.receipt(store, kept)).toMatchObject(same)
 })
 
 test("names a dev build's channel dev, so it follows dev builds", () => {
@@ -367,7 +369,7 @@ test("leaves out of the receipt an archive SHA-256 that isn't one, so the instal
 
   CliInstall.install(store, { execPath: path.join(root, "opencode-console"), sha256: "ABC " })
 
-  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel: "stable" })
+  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel })
 })
 
 test("asks a Windows agent's npm shim its version through cmd.exe, which mustn't look in the project first", () => {
