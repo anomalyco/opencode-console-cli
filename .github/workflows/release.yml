@@ -429,6 +429,34 @@ jobs:
             build=${{ needs.build.outputs.digest }} binaries=${{ needs.build-binaries.outputs.digest }}
             ${{ needs.plan.outputs.signed == 'true' && format('signed-macos={0} signed-windows={1} signed-linux={2}',
             needs.sign-macos.outputs.digest, needs.sign-windows.outputs.digest, needs.sign-linux.outputs.digest) || '' }}
+      - name: Check the public Linux installer key
+        if: needs.plan.outputs.mode == 'stable' || needs.plan.outputs.mode == 'beta'
+        run: |
+          curl --fail --silent --show-error --retry 3 \
+            https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install > "$RUNNER_TEMP/public-install"
+          sed -n "/^LINUX_SIGNING_KEY='-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----'$/p" "$RUNNER_TEMP/public-install" |
+            sed "1s/^LINUX_SIGNING_KEY='//; \$s/'$//" > "$RUNNER_TEMP/installer.pub"
+          cmp .github/release/linux-signing.pub "$RUNNER_TEMP/installer.pub" || {
+            echo '::error::The public installer needs the current Linux release key before this channel can ship.'
+            exit 1
+          }
+      - name: Set up npm for stable preflight
+        if: needs.plan.outputs.mode == 'stable'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.11.0"
+          package-manager-cache: false
+      - name: Verify npm trusted publishing before updating the stable feed
+        if: needs.plan.outputs.mode == 'stable'
+        env:
+          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          CONSOLE_CHANNEL: stable
+          CONSOLE_NPM_TAG: latest
+          CONSOLE_DRY_RUN: "true"
+          CONSOLE_REQUIRE_SIGNED: "true"
+        run: |
+          bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" \
+            "$RUNNER_TEMP/in/signed-macos" "$RUNNER_TEMP/in/signed-windows" "$RUNNER_TEMP/in/signed-linux"
       - name: Publish
         run: |
           bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/binaries" \

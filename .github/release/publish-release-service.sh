@@ -52,7 +52,7 @@ if dry_run; then
     status=$(curl -sS --retry 3 --config "$work/session.curl" -H 'content-type: application/json' -o "$work/session.json" \
       -w '%{http_code}' -d "$(jq -cn --arg channel "$CONSOLE_CHANNEL" '{artifact: "cli", channel: $channel}')" \
       "$release/opencode-console/sessions") || die "Couldn't reach $release for a publish session."
-    case "$status" in 2??) ;; *) die "The release service refused this job a publish session (HTTP $status): $(head -c 300 "$work/session.json")" ;; esac
+    case "$status" in 2??) ;; *) die "The release service refused this job a publish session (HTTP $status)." ;; esac
     jq -e '.token | type == "string" and length > 0' "$work/session.json" > /dev/null ||
       die "The release service answered without a publish session."
     rm -f "$work/session.curl" "$work/session.json"

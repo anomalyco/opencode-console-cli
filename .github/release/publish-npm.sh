@@ -84,7 +84,7 @@ trusted_publishing() { # <package name>
     die "Couldn't reach npm to sign in for $1."
   case "$status" in
     2??) ;;
-    *) die "npm trusted publishing refused this job for $1 (HTTP $status): $(jq -r '.message // .error // empty' "$private/exchange.json" 2> /dev/null | head -c 300)" ;;
+    *) die "npm trusted publishing refused this job for $1 (HTTP $status)." ;;
   esac
   jq -e '.token | type == "string" and length > 0' "$private/exchange.json" > /dev/null ||
     die "npm answered $1's sign-in without a token."
