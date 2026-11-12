@@ -3,8 +3,8 @@
 # service, https://anoma.ly/release, as app opencode-console, artifact cli,
 # through its shared client: a one-hour publish session from the job's GitHub OIDC token (no secrets),
 # content-addressed uploads, retries, and a check of every published file (--verify-downloads). The service admits
-# this workflow in environment release: refs/heads/dev for channel dev, refs/heads/production for stable and beta
-# (the service's registry entry for opencode-console names this repository, workflow and environment).
+# this workflow in environment release at refs/heads/dev, for every channel (the service's registry entry for
+# opencode-console names this repository, .github/workflows/release.yml, refs/heads/dev and environment release).
 #
 # A signed tarball (sign-macos.sh, sign-windows, sign-linux.sh) replaces the build's own of the same name. Publishing
 # the version the channel already has succeeds only when the service has exactly these files, so a rerun is safe. A dry
@@ -45,9 +45,9 @@ fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 RELEASE_ORIGIN=$release release_client "$work/client.sh"
-# npm's copy is recorded once it's on npm (publish-npm.sh); dev builds aren't published there.
+# npm's copy is recorded once it's on npm (publish-npm.sh); only stable is published there.
 distributions='[{"kind":"direct"}]'
-if [ "$CONSOLE_CHANNEL" != dev ]; then
+if [ -n "${CONSOLE_NPM_TAG:-}" ]; then
   distributions='[{"kind":"direct"},{"kind":"npm","command":"npx @opencode/console@'"$CONSOLE_NPM_TAG"' setup <agent>"}]'
 fi
 jq -n --arg channel "$CONSOLE_CHANNEL" --arg version "$CONSOLE_VERSION" --arg notes_url "$NOTES_URL" \

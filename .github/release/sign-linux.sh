@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # sign-linux.sh <binaries dir> <out dir>: signs each Linux binary inside its tarball with Anomaly's ed25519 release key,
-# CONSOLE_CLI_RELEASE_SIGNING_KEY (PEM), writing the raw 64-byte signature beside it as package/bin/opencode-console.sig,
+# CONSOLE_CLI_RELEASE_SIGNING_KEY (PEM, from with-secrets.sh), writing the raw 64-byte signature beside it as package/bin/opencode-console.sig,
 # and writes the repacked tarballs to <out dir>. The signed message is
 #   "anomaly.opencode-console.linux-artifact.v1\n<sha256 of the binary>\n"
 # The updater (src/update/signature.ts) verifies it with the public key in linux-signing.pub, which this

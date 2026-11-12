@@ -8,8 +8,9 @@
 # notarizing, so everything after signing still runs. The binaries are data here: they are never run.
 #
 # Ported from anomalyco/browse (sign-macos.sh, 2b6194cf) and anomalyco/hex (sign-macos.sh, a65a5e37). Environment:
-# CONSOLE_VERSION, CONSOLE_SIGNING_IDENTITY, CONSOLE_KEYCHAIN, CONSOLE_NOTARY_KEY, CONSOLE_NOTARY_KEY_ID,
-# CONSOLE_NOTARY_ISSUER (macos-credentials.sh).
+# CONSOLE_VERSION, CONSOLE_TEAM_ID, CONSOLE_NOTARY_KEY_ID, CONSOLE_NOTARY_ISSUER, and APPLE_SIGNING_CERTIFICATE and
+# APPLE_NOTARY_KEY from with-secrets.sh, which this script imports into a keychain under $RUNNER_TEMP/credentials
+# (macos-credentials.sh) and removes on exit.
 . "$(dirname "$0")/lib.sh"
 
 in=$1 out=$2
@@ -19,9 +20,26 @@ requirement=$(cat "$release/macos-requirement.txt")
 signed_requirement=${requirement% and notarized}
 [ "$signed_requirement" != "$requirement" ] || die "macos-requirement.txt must end with 'and notarized'."
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+credentials="${RUNNER_TEMP:?Set RUNNER_TEMP}/credentials"
+cleanup() {
+  rm -rf "$work"
+  if ! dry_run; then
+    security delete-keychain "$credentials/signing.keychain-db" 2> /dev/null || true
+    rm -rf "$credentials"
+  fi
+}
+trap cleanup EXIT
 mkdir -p "$out" "$work/notarize"
 export COPYFILE_DISABLE=1
+
+if ! dry_run; then
+  : "${CONSOLE_NOTARY_KEY_ID:?Set CONSOLE_NOTARY_KEY_ID}" "${CONSOLE_NOTARY_ISSUER:?Set CONSOLE_NOTARY_ISSUER}"
+  bash "$release/macos-credentials.sh" "$credentials"
+  unset APPLE_SIGNING_CERTIFICATE APPLE_NOTARY_KEY
+  keychain="$credentials/signing.keychain-db"
+  identity=$(cat "$credentials/identity")
+  notary_key="$credentials/notary-key.p8"
+fi
 
 for target in darwin-arm64 darwin-x64 darwin-x64-baseline; do
   file="$in/$(tarball_name "$target")"
@@ -39,14 +57,14 @@ for target in darwin-arm64 darwin-x64 darwin-x64-baseline; do
     continue
   fi
   codesign --force --timestamp --options runtime --entitlements "$release/entitlements/cli.plist" \
-    --identifier anomaly.opencode-console --keychain "$CONSOLE_KEYCHAIN" --sign "$CONSOLE_SIGNING_IDENTITY" "$bin"
+    --identifier anomaly.opencode-console --keychain "$keychain" --sign "$identity" "$bin"
   codesign --verify --strict --verbose=2 -R="$signed_requirement" "$bin"
   cp "$bin" "$work/notarize/opencode-console-$target"
 done
 if dry_run; then exit 0; fi
 
 /usr/bin/ditto -c -k --keepParent "$work/notarize" "$work/notarize.zip"
-xcrun notarytool submit "$work/notarize.zip" --key "$CONSOLE_NOTARY_KEY" --key-id "$CONSOLE_NOTARY_KEY_ID" \
+xcrun notarytool submit "$work/notarize.zip" --key "$notary_key" --key-id "$CONSOLE_NOTARY_KEY_ID" \
   --issuer "$CONSOLE_NOTARY_ISSUER" --wait --timeout 45m
 
 for target in darwin-arm64 darwin-x64 darwin-x64-baseline; do

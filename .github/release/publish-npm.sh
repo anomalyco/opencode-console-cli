@@ -3,16 +3,21 @@
 # (opencode-console-<target>-<version>.tgz: package/bin/opencode-console, and its .sig on Linux), then
 # opencode-console-<version>.tgz (@opencode/console, the npx package), all with CONSOLE_NPM_TAG. Names, the version and
 # the package set come from this script and the environment, never from the tarballs: each package.json is read as data
-# and must match. Lifecycle scripts never run (--ignore-scripts). npm authenticates with trusted publishing (OIDC) in
-# environment npm (production only); there is no token. Every real publish carries --provenance, which npm accepts only
-# from a public repository whose URL matches package.json's; a dry run has no OIDC token, so it leaves it out. Ported
-# from anomalyco/browse (publish-npm.sh, 2b6194cf).
+# and must match. Lifecycle scripts never run (--ignore-scripts). npm authenticates only with trusted publishing (OIDC),
+# bound to .github/workflows/release.yml in environment release; there is no token, and an npm token in the
+# environment fails the run. Every real publish carries --provenance, which npm accepts only from a public repository
+# whose URL matches package.json's; a dry run has no OIDC token, so it leaves it out. Ported from anomalyco/browse
+# (publish-npm.sh, 2b6194cf).
 . "$(dirname "$0")/lib.sh"
 
 build_dir=$1 binaries_dir=$2
 shift 2
 signed=("$@")
-[ -n "${CONSOLE_NPM_TAG:-}" ] || die "No npm dist-tag for channel ${CONSOLE_CHANNEL:-?}; dev builds aren't published to npm"
+[ -n "${CONSOLE_NPM_TAG:-}" ] || die "No npm dist-tag for channel ${CONSOLE_CHANNEL:-?}; only stable is published to npm"
+[ "${CONSOLE_CHANNEL:-}" = stable ] || die "Only stable is published to npm, not ${CONSOLE_CHANNEL:-?}"
+if [ -n "${NODE_AUTH_TOKEN:-}${NPM_TOKEN:-}" ]; then
+  die "An npm token is set; this job publishes with trusted publishing only"
+fi
 
 check_package() { # <file> <name> [<os> <cpu> <libc or "">]
   local file=$1 name=$2 packed_name packed_version config scripts os cpu libc

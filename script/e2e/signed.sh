@@ -181,30 +181,35 @@ CONSOLE_VERSION=0.1.11 CONSOLE_CHANNEL=dev CONSOLE_NPM_TAG='' CONSOLE_DRY_RUN=tr
   bash "$REPO/.github/release/publish-npm.sh" "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" > /dev/null 2>&1; status=$?
 check "publish-npm.sh refuses a dev build (exit $status)" '[ $status -ne 0 ]'
 
-# plan-release.sh with `gh` standing in for the GitHub API it reads package.json and the actor's role from. It asks the
-# real npm whether a version is out, so package.json says 99.0.0, which npm won't have, unless a check names 0.1.8.
+# plan-release.sh with `gh` standing in for the GitHub API it lists the tags from. The newest release tag is v98.9.9
+# among refs that aren't releases, so the stable it plans, 98.9.10, isn't on the real npm it asks, unless a check names
+# v0.1.7, whose next patch is.
 mkdir -p "$ROOT/bin"
 cat > "$ROOT/bin/gh" <<'GH'
 #!/bin/sh
 case "$*" in
-  *contents/package.json*) echo "{\"version\":\"${GH_VERSION:-99.0.0}\"}" ;;
-  *collaborators/*/permission*) echo "${GH_ROLE:-admin}" ;;
+  *matching-refs/tags/v*) printf '%s\n' $GH_TAGS ;;
 esac
 GH
 chmod +x "$ROOT/bin/gh"
-plan() { # <event> <ref> <channel> [role] [package.json version]
-  GITHUB_OUTPUT=$ROOT/plan.out GITHUB_EVENT_NAME=$1 GITHUB_REF=$2 INPUT_CHANNEL=$3 GH_ROLE=${4:-admin} GH_VERSION=${5:-99.0.0} \
+plan() { # <event> <ref> <channel> [bump] [tags]
+  GITHUB_OUTPUT=$ROOT/plan.out GITHUB_EVENT_NAME=$1 GITHUB_REF=$2 INPUT_CHANNEL=$3 INPUT_BUMP=${4:-patch} \
+    GH_TAGS=${5-"refs/tags/v0.1.8 refs/tags/v98.9.9 refs/tags/v99.0.0-beta.1 refs/tags/v099.0.0 refs/tags/vnext"} \
     GITHUB_REPOSITORY=anomalyco/opencode-console-cli GITHUB_SHA=abc GITHUB_RUN_NUMBER=142 GITHUB_RUN_ATTEMPT=1 \
-    GITHUB_ACTOR=maintainer PATH="$ROOT/bin:$PATH" bash "$REPO/.github/release/plan-release.sh" 2>&1 | grep -E '^(mode|version|channel|npm_tag|dry_run)=' | tr '\n' ' '
+    PATH="$ROOT/bin:$PATH" bash "$REPO/.github/release/plan-release.sh" 2>&1 | grep -E '^(mode|version|channel|npm_tag|dry_run)=' | tr '\n' ' '
 }
-check "a push to dev plans 99.0.0-dev.142, before the unpublished 99.0.0, for the release service only" '[ "$(plan push refs/heads/dev "")" = "mode=dev version=99.0.0-dev.142 channel=dev npm_tag= dry_run=false " ]'
-check "a push to dev after 0.1.8 is on npm plans the next patch, 0.1.9-dev.142" '[ "$(plan push refs/heads/dev "" admin 0.1.8)" = "mode=dev version=0.1.9-dev.142 channel=dev npm_tag= dry_run=false " ]'
-check "stable is refused for a version npm already has" '[ -z "$(plan workflow_dispatch refs/heads/production stable admin 0.1.8)" ]'
-check "stable on production plans 99.0.0 for npm latest" '[ "$(plan workflow_dispatch refs/heads/production stable)" = "mode=stable version=99.0.0 channel=stable npm_tag=latest dry_run=false " ]'
-check "beta on production plans 99.0.0-beta.142" '[ "$(plan workflow_dispatch refs/heads/production beta)" = "mode=beta version=99.0.0-beta.142 channel=beta npm_tag=beta dry_run=false " ]'
-check "check on any branch plans a dry run" '[ "$(plan workflow_dispatch refs/heads/feature check)" = "mode=check version=99.0.0 channel=stable npm_tag=latest dry_run=true " ]'
-check "stable from dev is refused" '[ -z "$(plan workflow_dispatch refs/heads/dev stable)" ]'
-check "stable by a writer who isn't a maintainer is refused" '[ -z "$(plan workflow_dispatch refs/heads/production stable write)" ]'
+check "a push to dev plans the next patch after the newest tag, 98.9.10-dev.142, for the release service only" '[ "$(plan push refs/heads/dev "")" = "mode=dev version=98.9.10-dev.142 channel=dev npm_tag= dry_run=false " ]'
+check "a dev dispatch ignores the bump" '[ "$(plan workflow_dispatch refs/heads/dev dev major)" = "mode=dev version=98.9.10-dev.142 channel=dev npm_tag= dry_run=false " ]'
+check "stable on dev bumps the patch by default, for npm latest" '[ "$(plan workflow_dispatch refs/heads/dev stable)" = "mode=stable version=98.9.10 channel=stable npm_tag=latest dry_run=false " ]'
+check "stable on dev bumps the minor" '[ "$(plan workflow_dispatch refs/heads/dev stable minor)" = "mode=stable version=98.10.0 channel=stable npm_tag=latest dry_run=false " ]'
+check "stable on dev bumps the major" '[ "$(plan workflow_dispatch refs/heads/dev stable major)" = "mode=stable version=99.0.0 channel=stable npm_tag=latest dry_run=false " ]'
+check "stable is refused for a version npm already has" '[ -z "$(plan workflow_dispatch refs/heads/dev stable patch refs/tags/v0.1.7)" ]'
+check "beta on dev plans 98.9.10-beta.142 for the release service only" '[ "$(plan workflow_dispatch refs/heads/dev beta)" = "mode=beta version=98.9.10-beta.142 channel=beta npm_tag= dry_run=false " ]'
+check "check on any branch plans a dry run of the stable" '[ "$(plan workflow_dispatch refs/heads/feature check)" = "mode=check version=98.9.10 channel=stable npm_tag=latest dry_run=true " ]'
+check "stable from production is refused" '[ -z "$(plan workflow_dispatch refs/heads/production stable)" ]'
+check "beta from another branch is refused" '[ -z "$(plan workflow_dispatch refs/heads/feature beta)" ]'
+check "an unknown bump is refused" '[ -z "$(plan workflow_dispatch refs/heads/dev stable huge)" ]'
+check "with no release tag yet, a push to dev counts from npm's latest" '[[ "$(plan push refs/heads/dev "" patch "")" =~ ^mode=dev\ version=[0-9]+\.[0-9]+\.[0-9]+-dev\.142\ channel=dev ]]'
 
 section "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]
