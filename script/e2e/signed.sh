@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end run of signed releases against local stand-ins. Run on Linux x64 from the repository root:
 #   bash script/e2e/signed.sh
-# A throwaway release key stands in for Anomaly's: this copy of the repo trusts it (linux-signing.pub, signature.ts,
-# install), and .github/release/sign-linux.sh signs with it. This copy also lets stable builds follow the stand-in
+# A test key made for this run stands in for Anomaly's release key: this copy of the repo trusts it (linux-signing.pub,
+# signature.ts, install), and .github/release/sign-linux.sh signs with it. No release run uses such a key. This copy also lets stable builds follow the stand-in
 # release service on 127.0.0.1, which only dev builds may do. Both patches are undone on exit. Isolated HOME and XDG.
 # Each check is a single-quoted command `check` evals later, so its variables expand then (SC2016, SC2034).
 # shellcheck disable=SC2016,SC2034
@@ -57,7 +57,7 @@ compile() { # <version>: packs/<version>/opencode-console-linux-x64-<version>.tg
   bun script/compile.ts linux-x64 >/dev/null || { echo "compile $1 failed"; exit 1; }
   bun script/pack.ts --out "$ROOT/rel/packs/$1" >/dev/null || { echo "pack $1 failed"; exit 1; }
 }
-sign() { # <version>: the real sign-linux.sh, with the throwaway key, for the one target built here
+sign() { # <version>: the real sign-linux.sh, with the test key, for the one target built here
   CONSOLE_TARGETS=linux-x64 CONSOLE_VERSION=$1 CONSOLE_CLI_RELEASE_SIGNING_KEY=$(cat "$ROOT/keys/release.pem") \
     bash "$REPO/.github/release/sign-linux.sh" "$ROOT/rel/packs/$1" "$ROOT/rel/signed/$1" >/dev/null
 }
@@ -78,7 +78,7 @@ hook() {
 # repack_as <dir with package/> <out> <target> [signed]: lib.sh's repack, with the target's fixed members
 repack_as() { (. "$REPO/.github/release/lib.sh"; read -ra files <<< "$(members "$3" "${4:-}")"; repack "$1" "$2" "${files[@]}"); }
 
-section "Build: stable binaries 0.1.9, 0.1.10, 0.1.11, signed by the real sign-linux.sh with a throwaway key"
+section "Build: stable binaries 0.1.9, 0.1.10, 0.1.11, signed by the real sign-linux.sh with the test key"
 patch
 for v in 0.1.9 0.1.10 0.1.11; do compile "$v"; done
 for v in 0.1.9 0.1.10 0.1.11; do sign "$v" || { echo "sign $v failed"; exit 1; }; done
@@ -164,19 +164,11 @@ truncate -s -1 "$RUNNER_TEMP/in/binaries/opencode-console-darwin-arm64-0.1.11.tg
 rm -f "$RUNNER_TEMP/in/binaries/SHA256SUMS" "$RUNNER_TEMP/in/build/SHA256SUMS"
 check "verify-artifacts.sh refuses an artifact with a digest that didn't download" '! CONSOLE_DIGESTS="binaries=$digest build=$bdigest signed-linux=$digest" bash "$REPO/.github/release/verify-artifacts.sh" "$RUNNER_TEMP/in" 2>/dev/null'
 mkdir -p "$RUNNER_TEMP/in/signed-linux"; cp "$ROOT/rel/signed/0.1.11/opencode-console-linux-x64-0.1.11.tgz" "$RUNNER_TEMP/in/signed-linux/"
-CONSOLE_TARGETS=linux-x64 CONSOLE_VERSION=0.1.11 CONSOLE_DRY_RUN=true bash "$REPO/.github/release/sign-linux.sh" "$ROOT/rel/packs/0.1.11" "$ROOT/rel/dry" > "$ROOT/sign-dry.log" 2>&1; status=$?
-check "a check run's sign-linux.sh signs with a throwaway key, no secret needed (exit $status)" '[ $status -eq 0 ] && grep -q "throwaway key" "$ROOT/sign-dry.log" && [ "$(tar -xzOf "$ROOT/rel/dry/opencode-console-linux-x64-0.1.11.tgz" package/bin/opencode-console.sig | wc -c)" = 64 ]'
+# The publish scripts' dry runs sign in to the release service and npm with the job's OIDC token, which only a check
+# run in environment release has, so only the refusals that come before signing in run here.
 CONSOLE_VERSION=0.1.11 CONSOLE_CHANNEL=stable CONSOLE_DRY_RUN=true CONSOLE_REQUIRE_SIGNED=true NOTES_URL=https://example.test \
   bash "$REPO/.github/release/publish-release-service.sh" "$RUNNER_TEMP/in/binaries" "" "" "$RUNNER_TEMP/in/signed-linux" > "$ROOT/publish-unsigned.log" 2>&1; status=$?
 check "a release that must be signed refuses to fall back to an unsigned tarball (exit $status)" '[ $status -ne 0 ] && grep -q "can.t fall back to the unsigned build" "$ROOT/publish-unsigned.log"'
-CONSOLE_VERSION=0.1.11 CONSOLE_CHANNEL=stable CONSOLE_NPM_TAG=latest CONSOLE_DRY_RUN=true NOTES_URL=https://example.test \
-  bash "$REPO/.github/release/publish-release-service.sh" "$RUNNER_TEMP/in/binaries" "" "" "$RUNNER_TEMP/in/signed-linux" > "$ROOT/publish-service.log" 2>&1; status=$?
-sed 's/^/    /' "$ROOT/publish-service.log"
-check "publish-release-service.sh's dry run lists all eleven targets, the signed Linux one in place of the build's (exit $status)" '[ $status -eq 0 ] && [ "$(grep -c "^- " "$ROOT/publish-service.log")" = 11 ] && grep -q "linux-x64 signed-linux/" "$ROOT/publish-service.log"'
-CONSOLE_VERSION=0.1.11 CONSOLE_CHANNEL=stable CONSOLE_NPM_TAG=latest CONSOLE_DRY_RUN=true \
-  bash "$REPO/.github/release/publish-npm.sh" "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" "" "" "$RUNNER_TEMP/in/signed-linux" > "$ROOT/publish-npm.log" 2>&1; status=$?
-grep -E "Would publish|error" "$ROOT/publish-npm.log" | sed 's/^/    /'
-check "publish-npm.sh's dry run publishes the eleven platform packages, then @opencode/console (exit $status)" '[ $status -eq 0 ] && [ "$(grep -c "^Would publish" "$ROOT/publish-npm.log")" = 12 ] && grep "^Would publish" "$ROOT/publish-npm.log" | tail -1 | grep -q "@opencode/console@0.1.11 "'
 CONSOLE_VERSION=0.1.11 CONSOLE_CHANNEL=dev CONSOLE_NPM_TAG='' CONSOLE_DRY_RUN=true \
   bash "$REPO/.github/release/publish-npm.sh" "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" > /dev/null 2>&1; status=$?
 check "publish-npm.sh refuses a dev build (exit $status)" '[ $status -ne 0 ]'
@@ -205,9 +197,9 @@ check "stable on dev bumps the minor" '[ "$(plan workflow_dispatch refs/heads/de
 check "stable on dev bumps the major" '[ "$(plan workflow_dispatch refs/heads/dev stable major)" = "mode=stable version=99.0.0 channel=stable npm_tag=latest dry_run=false " ]'
 check "stable is refused for a version npm already has" '[ -z "$(plan workflow_dispatch refs/heads/dev stable patch refs/tags/v0.1.7)" ]'
 check "beta on dev plans 98.9.10-beta.142 for the release service only" '[ "$(plan workflow_dispatch refs/heads/dev beta)" = "mode=beta version=98.9.10-beta.142 channel=beta npm_tag= dry_run=false " ]'
-check "check on any branch plans a dry run of the stable" '[ "$(plan workflow_dispatch refs/heads/feature check)" = "mode=check version=98.9.10 channel=stable npm_tag=latest dry_run=true " ]'
+check "check on dev plans a dry run of the stable" '[ "$(plan workflow_dispatch refs/heads/dev check)" = "mode=check version=98.9.10 channel=stable npm_tag=latest dry_run=true " ]'
 check "stable from production is refused" '[ -z "$(plan workflow_dispatch refs/heads/production stable)" ]'
-check "beta from another branch is refused" '[ -z "$(plan workflow_dispatch refs/heads/feature beta)" ]'
+check "beta or check from another branch is refused" '[ -z "$(plan workflow_dispatch refs/heads/feature beta)" ] && [ -z "$(plan workflow_dispatch refs/heads/feature check)" ]'
 check "an unknown bump is refused" '[ -z "$(plan workflow_dispatch refs/heads/dev stable huge)" ]'
 check "with no release tag yet, a push to dev counts from npm's latest" '[[ "$(plan push refs/heads/dev "" patch "")" =~ ^mode=dev\ version=[0-9]+\.[0-9]+\.[0-9]+-dev\.142\ channel=dev ]]'
 

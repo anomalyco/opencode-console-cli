@@ -14,7 +14,7 @@ planned version into its checkout, and nothing commits a version back.
 | `dev` | every push to `dev`, or a dispatch on `dev` | `<latest + patch>-dev.<run>` | the release service only, unsigned |
 | `beta` | a dispatch on `dev` | `<latest + bump>-beta.<run>` | the release service only, signed |
 | `stable` | a dispatch on `dev` | `<latest + bump>`, which must be new to npm | the release service and npm `latest`, signed; then tag `v<version>` and a GitHub release |
-| `check` | a dispatch on any branch | `<latest + bump>` | nothing: builds, signs with throwaway keys (ad hoc on macOS) and dry-runs every publish step |
+| `check` | a dispatch on `dev` | `<latest + bump>` | nothing: builds and signs as stable does, with the real keys, signs in to the release service and npm, and dry-runs every publish step; never tags |
 
 `bump` is `patch` (the default), `minor` or `major`. A rerun adds its attempt to `<run>` (`0.1.11-dev.142.2`). Until the
 first `vX.Y.Z` tag exists, npm's latest `@opencode/console` stands in for `<latest>`.
@@ -33,7 +33,8 @@ release. `required` moves every install regardless of `rollout_percent`; use it 
    ```
 
    Add `-f bump=minor` or `-f bump=major` for a bigger step, `-f rollout_percent=10` to stage it, or `-f channel=beta`
-   for a prerelease. `-f channel=check` first shows the version it would publish and runs everything as a dry run.
+   for a prerelease. `-f channel=check` first shows the version it would publish: it signs and notarizes with the real
+   credentials and proves the release service and npm admit the run, but publishes and tags nothing.
 4. Check that `https://anoma.ly/release/opencode-console/cli/stable.json` names the version for all eleven targets,
    `npm view @opencode/console@<version> dist.attestations` shows its provenance, and tag `v<version>` exists.
 
@@ -61,10 +62,12 @@ back. On a member's machine, a build whose hooks crash three times in a row also
 - Every later job checks out only `.github/release/`, checks each artifact against the digest of the job that made it,
   and treats artifacts as data. None of them runs repository code.
 - Every signing and publishing job (`sign-macos`, `sign-windows`, `sign-linux`, `publish-release-service`,
-  `publish-npm`, `finish`) runs in environment `release`, which only `dev` may use and which holds no secrets. A check
-  run gives them no environment: they sign in nowhere, read no secret, sign with throwaway keys (an ad hoc signature
-  on macOS, a self-signed certificate on Windows, a generated ed25519 key on Linux) and dry-run every publish step.
-  Dev builds ship unsigned. The values live in:
+  `publish-npm`, `finish`) always runs in environment `release`, which only `dev` may use and which holds no secrets;
+  no job picks its environment at run time. A check run signs exactly as beta and stable do, with the same AWS role,
+  secrets, Azure account and Developer ID, and notarizes; the release key in `linux-signing.pub` is the only one
+  `sign-linux.sh` signs with. Its publish jobs sign in by OIDC (a release service publish session, an npm trusted
+  publishing token for every package) and then stop: `dry_run` only guards publishing and tagging, and every artifact
+  is still checked against its producer's digest. Dev builds ship unsigned. The values live in:
 
   | Value | Where |
   | --- | --- |
@@ -87,7 +90,8 @@ back. On a member's machine, a build whose hooks crash three times in a row also
   subjects, which name the owner's and repository's IDs, so the AWS role and the Azure credential survive a rename but
   not a recreated repo.
 - `finish` tags `v<version>` at the run's commit only once npm has the release, so a failed run never spends a version,
-  and fails if the tag already points elsewhere. It then releases that tag with `gh release create --verify-tag`.
+  and fails if the tag already points elsewhere. It then releases that tag with `gh release create --verify-tag`. A
+  check run never reaches `finish`, and `tag-release.sh` refuses a dry run anyway.
 - Jobs that publish download the release service's client and check it against `.github/release/client.sh.sha256`
   before running it. When the service ships a new client, a release fails until a pull request updates the pin:
   `curl -fsSL https://anoma.ly/release/client.sh | shasum -a 256`, after reading what changed.

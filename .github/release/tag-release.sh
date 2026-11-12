@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # tag-release.sh: tags refs/tags/v$CONSOLE_VERSION at $SHA once a stable release has published, so a failed run never
 # spends a version. Creates it through the API; when it already exists, resolves it, peeling annotated tags, and fails
-# unless it's $SHA. A rerun of the same run finds its own tag and goes on.
+# unless it's $SHA. A rerun of the same run finds its own tag and goes on. A dry run (check) fails before it touches a
+# tag, which also stops the GitHub release that follows it.
 #
-# Environment: CONSOLE_VERSION, SHA, GH_REPO, GH_TOKEN (contents: write).
+# Environment: CONSOLE_VERSION, CONSOLE_DRY_RUN, SHA, GH_REPO, GH_TOKEN (contents: write).
 . "$(dirname "$0")/lib.sh"
+
+if dry_run; then die "A dry run never tags or releases."; fi
 
 : "${CONSOLE_VERSION:?Set CONSOLE_VERSION}" "${SHA:?Set SHA}" "${GH_REPO:?Set GH_REPO}"
 [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || die "SHA must be a full commit SHA, not $SHA"

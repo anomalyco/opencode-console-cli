@@ -9,8 +9,10 @@
 #   dispatch beta on dev                   beta    <latest + bump>-beta.<run>[.<attempt>]    the release service only
 #   dispatch stable on dev                 stable  <latest + bump>                           release service, npm latest,
 #                                                                                            then tag v<version>
-#   dispatch check, on any branch          check   <latest + bump>                           builds, signs with throwaway
-#                                                                                            keys, publishes nothing
+#   dispatch check on dev                  check   <latest + bump>                           builds and signs as stable
+#                                                                                            does, signs in to every
+#                                                                                            publisher, publishes and
+#                                                                                            tags nothing
 # <latest> is the highest vX.Y.Z tag, and bump is patch (the default), minor or major. Until the first tag exists, npm's
 # latest @opencode/console stands in for it.
 . "$(dirname "$0")/lib.sh"
@@ -20,8 +22,8 @@ case "$GITHUB_EVENT_NAME:$GITHUB_REF:$channel_input" in
   push:refs/heads/dev:* | workflow_dispatch:refs/heads/dev:dev) mode=dev ;;
   workflow_dispatch:refs/heads/dev:stable) mode=stable ;;
   workflow_dispatch:refs/heads/dev:beta) mode=beta ;;
-  workflow_dispatch:*:check) mode=check ;;
-  *) die "$GITHUB_EVENT_NAME on $GITHUB_REF can't publish channel $channel_input: dev, beta and stable publish from dev only" ;;
+  workflow_dispatch:refs/heads/dev:check) mode=check ;;
+  *) die "$GITHUB_EVENT_NAME on $GITHUB_REF can't run channel $channel_input: check, dev, beta and stable run from dev only" ;;
 esac
 
 bump=${INPUT_BUMP:-patch}

@@ -8,7 +8,9 @@
 #
 # A signed tarball (sign-macos.sh, sign-windows, sign-linux.sh) replaces the build's own of the same name. Publishing
 # the version the channel already has succeeds only when the service has exactly these files, so a rerun is safe. A dry
-# run prints what it would publish. Ported from anomalyco/browse (publish-release-service.sh, 2b6194cf).
+# run (check) checks the pinned client, trades the job's OIDC token for a publish session as the client does, so the
+# service's admission of this job is proven, and prints what it would publish: it uploads and publishes nothing. Ported
+# from anomalyco/browse (publish-release-service.sh, 2b6194cf).
 . "$(dirname "$0")/lib.sh"
 
 release=${CONSOLE_RELEASE_SERVICE:-https://anoma.ly/release}
@@ -33,18 +35,36 @@ for target in $TARGETS; do
   set -- "$@" --target "$(service_target "$target")=$file"
 done
 
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+RELEASE_ORIGIN=$release release_client "$work/client.sh"
+
 if dry_run; then
+  : "${ACTIONS_ID_TOKEN_REQUEST_URL:?Run in a GitHub Actions job with id-token: write}"
+  : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?Run in a GitHub Actions job with id-token: write}"
+  # The tokens stay in a curl config file, never in argv or the log; the session is discarded unused.
+  (
+    umask 077
+    oidc=$(curl -fsS --retry 3 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+      "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$release" | jq -er .value) || die "Couldn't get a GitHub OIDC token for $release."
+    printf '::add-mask::%s\n' "$oidc"
+    printf 'header = "Authorization: Bearer %s"\n' "$oidc" > "$work/session.curl"
+    status=$(curl -sS --retry 3 --config "$work/session.curl" -H 'content-type: application/json' -o "$work/session.json" \
+      -w '%{http_code}' -d "$(jq -cn --arg channel "$CONSOLE_CHANNEL" '{artifact: "cli", channel: $channel}')" \
+      "$release/opencode-console/sessions") || die "Couldn't reach $release for a publish session."
+    case "$status" in 2??) ;; *) die "The release service refused this job a publish session (HTTP $status): $(head -c 300 "$work/session.json")" ;; esac
+    jq -e '.token | type == "string" and length > 0' "$work/session.json" > /dev/null ||
+      die "The release service answered without a publish session."
+    rm -f "$work/session.curl" "$work/session.json"
+  )
   summary "### Release service (dry run)" "" \
+    "The service admits this job for opencode-console/cli/$CONSOLE_CHANNEL." \
     "Would publish $CONSOLE_VERSION to $release/opencode-console/cli/$CONSOLE_CHANNEL.json (rollout $rollout%, required $required):"
   for target in $TARGETS; do
     summary "- $(service_target "$target") $(target_file "$target" "$binaries_dir" "${signed[@]}" | sed "s|^$RUNNER_TEMP/in/||")"
   done
   exit 0
 fi
-
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
-RELEASE_ORIGIN=$release release_client "$work/client.sh"
 # npm's copy is recorded once it's on npm (publish-npm.sh); only stable is published there.
 distributions='[{"kind":"direct"}]'
 if [ -n "${CONSOLE_NPM_TAG:-}" ]; then

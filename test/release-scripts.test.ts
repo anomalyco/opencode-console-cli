@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -42,14 +51,23 @@ function tree(license: (file: string) => void = (file) => writeFileSync(file, "M
   return root
 }
 
-/** sign-linux.sh in a check run's dry run, which signs with a throwaway key. */
+/**
+ * sign-linux.sh as a release runs it, from a copy of the script and lib.sh whose linux-signing.pub is a key made for
+ * the test, since the script signs only with a key that matches linux-signing.pub.
+ */
 function sign(binaries: string) {
+  const scripts = temporary()
+  for (const file of ["sign-linux.sh", "lib.sh"]) copyFileSync(path.join(release, file), path.join(scripts, file))
+  const key = path.join(temporary(), "key.pem")
+  expect(Bun.spawnSync(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", key]).exitCode).toBe(0)
+  const pub = Bun.spawnSync(["openssl", "pkey", "-in", key, "-pubout", "-out", path.join(scripts, "linux-signing.pub")])
+  expect(pub.exitCode).toBe(0)
   const out = path.join(temporary(), "signed")
-  const result = Bun.spawnSync(["bash", path.join(release, "sign-linux.sh"), binaries, out], {
+  const result = Bun.spawnSync(["bash", path.join(scripts, "sign-linux.sh"), binaries, out], {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
-      CONSOLE_DRY_RUN: "true",
+      CONSOLE_CLI_RELEASE_SIGNING_KEY: readFileSync(key, "utf8"),
       CONSOLE_TARGETS: "linux-x64",
       CONSOLE_VERSION: VERSION,
     },

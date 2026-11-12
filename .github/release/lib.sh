@@ -20,6 +20,7 @@ die() {
   exit 1
 }
 
+# A check run. It only stops publishing and tagging; signing and every artifact check run as in a release.
 dry_run() {
   [ "${CONSOLE_DRY_RUN:-false}" = true ]
 }
