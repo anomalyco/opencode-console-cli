@@ -22,7 +22,7 @@ import { UpdateEnvironment } from "./environment"
  * `CONSOLE_CLI_RELEASE_SIGNING_KEY` secret is its private half); a test keeps the two the same.
  */
 export const LINUX_SIGNING_KEY = `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAppH4owNdPd5Ktoj4LvYkz88BeykCWNB9mbZWveLvWt8=
+MCowBQYDK2VwAyEAQjcSdBCAr0ELg9aHhZnbZ7bl0ytNldsPcGu0SEIfdyw=
 -----END PUBLIC KEY-----
 `
 
