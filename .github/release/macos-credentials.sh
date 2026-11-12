@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# macos-credentials.sh <dir>: imports the Developer ID certificate into a new keychain in <dir> and writes the App
-# Store Connect API key for notarytool there. Prints nothing secret. Appends CONSOLE_KEYCHAIN, CONSOLE_SIGNING_IDENTITY
-# and CONSOLE_NOTARY_KEY to $GITHUB_ENV. Ported from anomalyco/hex (.github/release/macos-credentials.sh, a65a5e37).
+# macos-credentials.sh <dir>: imports the Developer ID certificate into a new keychain, <dir>/signing.keychain-db, writes
+# the App Store Connect API key for notarytool to <dir>/notary-key.p8 and the signing identity's name to <dir>/identity.
+# Prints nothing secret and writes nothing to $GITHUB_ENV: sign-macos.sh runs it in the one step that holds the secrets.
+# Ported from anomalyco/hex (.github/release/macos-credentials.sh, a65a5e37).
 #
 # Environment: APPLE_SIGNING_CERTIFICATE (a base64 .p12 with no password), APPLE_NOTARY_KEY (the .p8, as PEM or
-# base64), CONSOLE_TEAM_ID.
+# base64), from with-secrets.sh, and CONSOLE_TEAM_ID.
 . "$(dirname "$0")/lib.sh"
 
 dir=$1
@@ -40,8 +41,4 @@ case "$APPLE_NOTARY_KEY" in
 esac
 grep -q -- '-----BEGIN PRIVATE KEY-----' "$key" || die "APPLE_NOTARY_KEY is not an App Store Connect API key (.p8)."
 
-{
-  echo "CONSOLE_KEYCHAIN=$keychain"
-  echo "CONSOLE_SIGNING_IDENTITY=$identity"
-  echo "CONSOLE_NOTARY_KEY=$key"
-} >> "$GITHUB_ENV"
+printf '%s\n' "$identity" > "$dir/identity"

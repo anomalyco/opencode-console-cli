@@ -1,36 +1,30 @@
-name: Publish Console CLI
-run-name: "${{ github.event_name == 'workflow_dispatch' && format('Console CLI {0} from {1}', inputs.channel, github.ref_name) || '' }}"
+name: release
+run-name: "${{ github.event_name == 'workflow_dispatch' && format('release {0} {1} from {2}', inputs.channel, inputs.bump, github.ref_name) || '' }}"
 
 # Publishes the CLI (`opencode-console`): eleven binaries to Anomaly's release service
-# (https://anoma.ly/release/opencode-console/cli/<channel>.json), which installs follow, and for stable and beta the
-# binaries as @opencode/console-<target> and the Node bundle as @opencode/console on npm. RELEASING.md has the flow.
+# (https://anoma.ly/release/opencode-console/cli/<channel>.json), which installs follow, and for stable the binaries as
+# @opencode/console-<target> and the Node bundle as @opencode/console on npm. RELEASING.md has the flow.
 #
-#   push to dev, or dispatch dev on dev               dev     <next patch>-dev.<run>: the release service only
-#   dispatch beta on production                       beta    <version>-beta.<run>: the release service, npm beta
-#   dispatch stable on production                     stable  package.json's version: the release service,
-#                                                             npm latest, tag v<version>
-#   dispatch check, on any branch                     check   builds and checks everything, signs ad hoc (macOS)
-#                                                             and with a throwaway key (Linux), and runs every publish
-#                                                             script as a dry run
+#   push to dev, or dispatch dev on dev     dev     <latest + patch>-dev.<run>: the release service only, unsigned
+#   dispatch beta on dev                    beta    <latest + bump>-beta.<run>: the release service only, signed
+#   dispatch stable on dev                  stable  <latest + bump>: the release service, npm latest, then tag
+#                                                   v<version> and a GitHub release
+#   dispatch check on dev                   check   <latest + bump>: builds and signs as stable does, with the real
+#                                                   credentials, signs in to the release service and npm by OIDC, and
+#                                                   runs every publish script as a dry run: publishes and tags nothing
+# <latest> is the newest vX.Y.Z tag; bump is patch (the default), minor or major. Nothing commits a version back.
 #
-# Builds are separated from signing and publishing (ported from anomalyco/browse's release.yml, 2b6194cf, and
-# anomalyco/hex's, a65a5e37):
+# Builds are separated from signing and publishing (as in anomalyco/opencode's release.yml):
 # - build and build-binaries run repository code (bun install, typecheck, tests, script/compile.ts) with no
 #   environment, secrets or id-token, and upload their artifacts with a SHA256SUMS whose digest they output.
-# - Every later job checks out only .github/release/, verifies each artifact against the digest of the job that made it,
-#   and runs those scripts on the artifacts as data. It never executes repository code.
-# - Only stable and beta sign; they fail when any value is missing. Dev builds ship unsigned, so no push to dev can
-#   reach a signing key. sign-macos runs in environment signing-macos (production only), signs in to AWS by OIDC as
-#   that environment and reads the Apple certificate and notary key from Secrets Manager, and the notary key's IDs from
-#   its variables. Its own environment keeps the org-wide Apple keys away from the other signing jobs' dependencies.
-#   sign-windows and sign-linux run in environment signing (production only) and read the Azure and Linux values from
-#   its secrets, each in one "Load signing secrets" step.
-# - The release service runs in environment release (dev and production), which holds no secrets: the service admits
-#   it by OIDC. npm runs in environment npm (production only, no secrets), which every package's trusted publishing
-#   names, so no dev run can mint a token npm accepts.
-# .github/ is the security boundary for releases. Changes to it need a code owner's review, which repository admins
-# may skip when merging a pull request. Required Checks and the merge methods apply to everyone, and only admins and
-# maintainers may merge into production.
+# - Every later job checks out only .github/release/, verifies each artifact against the digest the job that made it
+#   output before it signs or publishes, and treats artifacts as data. It never executes repository code.
+# - sign-*, publish-* and finish always run in environment release (dev only). sign-macos and sign-linux assume
+#   arn:aws:iam::604439173067:role/github/opencode-console-cli-release over OIDC, with its credentials as step outputs,
+#   and with-secrets.sh hands each secret only to the step that signs with it. Azure and the notary key's IDs are
+#   variables. npm publishes with trusted publishing only, and the release service admits the job's OIDC token.
+# - dry_run (check) only stops the publish and tag steps; signing and every digest check run as in a release.
+# .github/ is the security boundary for releases; changes to it need a code owner's review.
 
 on:
   push:
@@ -41,10 +35,15 @@ on:
   workflow_dispatch:
     inputs:
       channel:
-        description: "check: build and dry-run everything. dev (on dev), beta or stable (on production): publish"
+        description: "On dev. check: build, sign for real and dry-run every publish. dev, beta or stable: publish"
         type: choice
         options: [check, dev, beta, stable]
         default: check
+      bump:
+        description: Beta, stable and check. Which part of the latest vX.Y.Z tag to bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
       rollout_percent:
         description: Beta and stable only. The share of installs that take the release at once
         type: number
@@ -57,7 +56,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: publish-console-cli-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'dev' }}
+  group: release-${{ github.ref }}-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'dev' }}
   # Never cancel a release halfway through publishing.
   cancel-in-progress: false
 
@@ -83,8 +82,8 @@ jobs:
       dry_run: ${{ steps.plan.outputs.dry_run }}
       rollout: ${{ steps.plan.outputs.rollout }}
       required: ${{ steps.plan.outputs.required }}
-      # Stable and beta can't ship without every platform signed.
-      signed: ${{ steps.plan.outputs.mode == 'stable' || steps.plan.outputs.mode == 'beta' }}
+      # Stable and beta can't ship without every platform signed, and check signs exactly as stable does.
+      signed: ${{ steps.plan.outputs.mode == 'stable' || steps.plan.outputs.mode == 'beta' || steps.plan.outputs.mode == 'check' }}
     steps:
       - &checkout-release
         name: Check out the release scripts
@@ -98,8 +97,9 @@ jobs:
         name: Plan
         run: bash .github/release/plan-release.sh
         env:
-          GH_TOKEN: ${{ github.token }} # reads package.json and the triggering actor's repository role
+          GH_TOKEN: ${{ github.token }} # reads the repository's tags
           INPUT_CHANNEL: ${{ inputs.channel }}
+          INPUT_BUMP: ${{ inputs.bump }}
           INPUT_ROLLOUT: ${{ inputs.rollout_percent }}
           INPUT_REQUIRED: ${{ inputs.required }}
 
@@ -125,8 +125,7 @@ jobs:
         with:
           node-version-file: .node-version
           package-manager-cache: false
-      # No step here restores a cache: dev is the default branch, so a production run could restore one a dev run
-      # wrote, and the build would run what it holds.
+      # No step here restores a cache a run on another branch could have written, so the build runs only this commit.
       - &setup-bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -211,79 +210,63 @@ jobs:
           path: ${{ runner.temp }}/binaries
 
   # ---- Sign: environment release; only .github/release/ is checked out ----------------------------------------------
+  # Beta, stable and check sign for real, with the same credentials: a check run proves every signing path before a
+  # release depends on it. Dev builds ship unsigned.
 
-  # Developer ID, hardened runtime and notarization for the three macOS binaries, on stable and beta. A check run has no
-  # environment and never signs in to AWS, so no secrets: it signs ad hoc, so the rest of the release still runs on its
-  # output.
+  # Developer ID, hardened runtime and notarization for the three macOS binaries.
   sign-macos:
     name: Sign and notarize the macOS binaries
     needs: [plan, build-binaries]
     runs-on: macos-26
     timeout-minutes: 60
-    if: needs.plan.outputs.signed == 'true' || needs.plan.outputs.mode == 'check'
-    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing-macos' || '' }}
+    if: needs.plan.outputs.signed == 'true'
+    environment: release
     permissions:
       contents: read
       id-token: write # the AWS sign-in
     env:
       CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
-      CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-      # The notary key's IDs aren't secret, so they're environment signing-macos's variables.
-      CONSOLE_NOTARY_KEY_ID: ${{ needs.plan.outputs.signed == 'true' && vars.APPLE_NOTARY_KEY_ID || '' }}
-      CONSOLE_NOTARY_ISSUER: ${{ needs.plan.outputs.signed == 'true' && vars.APPLE_NOTARY_ISSUER_ID || '' }}
+      CONSOLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+      CONSOLE_NOTARY_ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
     steps:
       - *checkout-release
-      # The Developer ID certificate (a base64 .p12 with no password) and the notary key are shared with
-      # anomalyco/opencode in AWS Secrets Manager. The role trusts only this environment's OIDC subject,
-      # repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:signing-macos. The fetch action masks every
-      # value, each line included, before it reaches the job's environment.
-      - name: Configure AWS credentials
-        if: needs.plan.outputs.signed == 'true'
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: arn:aws:iam::604439173067:role/github/opencode-console-cli-signing
-          role-session-name: opencode-console-cli-${{ github.run_id }}
-          aws-region: us-east-1
-      - name: Read signing secrets
-        if: needs.plan.outputs.signed == 'true'
-        uses: aws-actions/aws-secretsmanager-get-secrets@2297f9a879480a9e3af9b293ed15c70caf8e1c88 # v3.0.2
-        with:
-          secret-ids: |
-            APPLE_SIGNING_CERTIFICATE,shared/APPLE_SIGNING_CERTIFICATE
-            APPLE_NOTARY_KEY,shared/APPLE_NOTARY_KEY
-          parse-json-secrets: false
-      - id: credentials
-        name: Require the Apple values
-        env:
-          REQUIRED: ${{ needs.plan.outputs.signed }}
-        run: |
-          missing=
-          for name in APPLE_SIGNING_CERTIFICATE APPLE_NOTARY_KEY CONSOLE_NOTARY_KEY_ID CONSOLE_NOTARY_ISSUER; do
-            [ -n "$(printenv "$name")" ] || missing="$missing $name"
-          done
-          if [ "$REQUIRED" != true ]; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Check run: macOS binaries are signed ad hoc and not notarized." | tee -a "$GITHUB_STEP_SUMMARY"
-          elif [ -n "$missing" ]; then
-            echo "::error::Stable and beta releases need signed macOS binaries, and this run lacks:$missing."
-            exit 1
-          else
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          fi
       - name: Download
         uses: ./.github/release/download
         with:
           pattern: binaries
           digests: binaries=${{ needs.build-binaries.outputs.digest }}
-      - name: Import the certificate and notary key
-        if: steps.credentials.outputs.available == 'true'
-        run: bash .github/release/macos-credentials.sh "$RUNNER_TEMP/credentials"
+      - name: Require the notary key's IDs
+        run: |
+          if [ -z "$CONSOLE_NOTARY_KEY_ID" ] || [ -z "$CONSOLE_NOTARY_ISSUER" ]; then
+            echo "::error::Signed releases need variables APPLE_NOTARY_KEY_ID and APPLE_NOTARY_ISSUER_ID."
+            exit 1
+          fi
+      # The role trusts only this repository, release.yml and environment release. Its credentials stay step outputs,
+      # passed only to the step that reads a secret with them.
+      - &aws
+        id: aws
+        name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          output-env-credentials: false
+          output-credentials: true
+          role-to-assume: arn:aws:iam::604439173067:role/github/opencode-console-cli-release
+          role-session-name: opencode-console-cli-${{ github.run_id }}
+          aws-region: us-east-1
+      # The Developer ID certificate (a base64 .p12 with no password) and the notary key are shared with
+      # anomalyco/opencode. sign-macos.sh imports them into a keychain it removes on exit.
       - name: Sign and notarize
-        run: bash .github/release/sign-macos.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/signed"
+        run: |
+          bash .github/release/with-secrets.sh APPLE_SIGNING_CERTIFICATE=shared/APPLE_SIGNING_CERTIFICATE \
+            APPLE_NOTARY_KEY=shared/APPLE_NOTARY_KEY -- bash .github/release/sign-macos.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/signed"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
       - name: Remove the credentials
-        if: always() && steps.credentials.outputs.available == 'true'
+        if: always()
         run: |
           security delete-keychain "$RUNNER_TEMP/credentials/signing.keychain-db" 2>/dev/null || true
           rm -rf "$RUNNER_TEMP/credentials"
@@ -295,76 +278,57 @@ jobs:
 
   # Authenticode through Azure Artifact Signing for the two Windows binaries, signed in by OIDC. This repository uses
   # immutable OIDC subjects, so the federated credential names
-  # repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:signing. A check run repacks them unsigned.
+  # repo:anomalyco@66570915/opencode-console-cli@1452060248:environment:release.
   sign-windows:
     name: Sign the Windows binaries
     needs: [plan, build-binaries]
     runs-on: windows-latest
     timeout-minutes: 30
-    if: needs.plan.outputs.signed == 'true' || needs.plan.outputs.mode == 'check'
-    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing' || '' }}
+    if: needs.plan.outputs.signed == 'true'
+    environment: release
     permissions:
       contents: read
-      id-token: write
+      id-token: write # the Azure sign-in
     env:
       CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
     steps:
       - *checkout-release
-      # The only step that reads signing values, from environment signing's secrets.
-      - name: Load signing secrets
-        if: needs.plan.outputs.signed == 'true'
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: binaries
+          digests: binaries=${{ needs.build-binaries.outputs.digest }}
+      - name: Require the Azure variables
         env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ secrets.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-          AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE: ${{ secrets.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
-        run: |
-          bash .github/release/export-env.sh AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID \
-            AZURE_TRUSTED_SIGNING_ENDPOINT AZURE_TRUSTED_SIGNING_ACCOUNT_NAME AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE
-      - id: credentials
-        name: Require the Azure values
-        env:
-          REQUIRED: ${{ needs.plan.outputs.signed }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          AZURE_TRUSTED_SIGNING_ENDPOINT: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          AZURE_TRUSTED_SIGNING_ACCOUNT_NAME: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
         run: |
           missing=
           for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID AZURE_TRUSTED_SIGNING_ENDPOINT \
             AZURE_TRUSTED_SIGNING_ACCOUNT_NAME AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE; do
             [ -n "$(printenv "$name")" ] || missing="$missing $name"
           done
-          if [ "$REQUIRED" != true ]; then
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Check run: Windows binaries are unpacked and repacked, not signed." | tee -a "$GITHUB_STEP_SUMMARY"
-          elif [ -n "$missing" ]; then
-            echo "::error::Stable and beta releases need signed Windows binaries, and environment signing lacks:$missing."
-            exit 1
-          else
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Download
-        uses: ./.github/release/download
-        with:
-          pattern: binaries
-          digests: binaries=${{ needs.build-binaries.outputs.digest }}
+          [ -z "$missing" ] || { echo "::error::Signed releases need signed Windows binaries, and this run lacks variables:$missing."; exit 1; }
       - name: Take out the executables
         run: bash .github/release/windows-binaries.sh unpack "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/work"
       - name: Sign in to Azure
-        if: steps.credentials.outputs.available == 'true'
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
         with:
-          client-id: ${{ env.AZURE_CLIENT_ID }}
-          tenant-id: ${{ env.AZURE_TENANT_ID }}
-          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       - name: Sign
-        if: steps.credentials.outputs.available == 'true'
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
         with:
-          endpoint: ${{ env.AZURE_TRUSTED_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ env.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
-          certificate-profile-name: ${{ env.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
+          endpoint: ${{ vars.AZURE_TRUSTED_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_TRUSTED_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE }}
           files-folder: ${{ runner.temp }}\work\sign
           files-folder-filter: exe
           file-digest: SHA256
@@ -385,7 +349,6 @@ jobs:
           exclude-azure-developer-cli-credential: true
           exclude-interactive-browser-credential: true
       - name: Check the signatures
-        if: steps.credentials.outputs.available == 'true'
         shell: pwsh
         run: .github/release/verify-authenticode.ps1 -Folders "$env:RUNNER_TEMP/work/sign"
       - name: Repack
@@ -402,94 +365,61 @@ jobs:
     needs: [plan, build-binaries]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    if: needs.plan.outputs.signed == 'true' || needs.plan.outputs.mode == 'check'
-    environment: ${{ needs.plan.outputs.signed == 'true' && 'signing' || '' }}
+    if: needs.plan.outputs.signed == 'true'
+    environment: release
     permissions:
       contents: read
-      id-token: write # for a secrets manager's OIDC sign-in
+      id-token: write # the AWS sign-in
     env:
       CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
-      CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
     steps:
       - *checkout-release
-      # The only step that reads signing values, from environment signing's secrets.
-      - name: Load signing secrets
-        if: needs.plan.outputs.signed == 'true'
-        env:
-          CONSOLE_CLI_RELEASE_SIGNING_KEY: ${{ secrets.CONSOLE_CLI_RELEASE_SIGNING_KEY }}
-        run: bash .github/release/export-env.sh CONSOLE_CLI_RELEASE_SIGNING_KEY
-      - id: credentials
-        name: Require the Linux key
-        env:
-          REQUIRED: ${{ needs.plan.outputs.signed }}
-        run: |
-          if [ "$REQUIRED" != true ]; then
-            echo "::notice::Check run: Linux binaries are signed with a throwaway key." | tee -a "$GITHUB_STEP_SUMMARY"
-          elif [ -z "${CONSOLE_CLI_RELEASE_SIGNING_KEY:-}" ]; then
-            echo "::error::Stable and beta releases need signed Linux binaries, and environment signing lacks CONSOLE_CLI_RELEASE_SIGNING_KEY."
-            exit 1
-          fi
       - name: Download
         uses: ./.github/release/download
         with:
           pattern: binaries
           digests: binaries=${{ needs.build-binaries.outputs.digest }}
+      - *aws
       - name: Sign
-        run: bash .github/release/sign-linux.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/signed"
+        run: |
+          bash .github/release/with-secrets.sh \
+            CONSOLE_CLI_RELEASE_SIGNING_KEY=opencode-console-cli/release/CONSOLE_CLI_RELEASE_SIGNING_KEY \
+            -- bash .github/release/sign-linux.sh "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/signed"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ steps.aws.outputs.aws-access-key-id }}
+          AWS_SECRET_ACCESS_KEY: ${{ steps.aws.outputs.aws-secret-access-key }}
+          AWS_SESSION_TOKEN: ${{ steps.aws.outputs.aws-session-token }}
       - id: upload
         uses: ./.github/release/upload
         with:
           name: signed-linux
           path: ${{ runner.temp }}/signed
 
-  # ---- Publish: only .github/release/ is checked out; artifacts are data --------------------------------------------
-
-  # Stable only, before anything leaves GitHub: claims refs/tags/v<version> at this run's commit (reserve-tag.sh), so a
-  # tag someone made at another commit stops the release before it publishes rather than after. A rerun at the same
-  # commit finds its own tag.
-  reserve-tag:
-    name: Reserve the release tag
-    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux]
-    if: >-
-      ${{ !cancelled() && needs.plan.outputs.mode == 'stable' && needs.build.result == 'success'
-      && needs.build-binaries.result == 'success' && needs.sign-macos.result == 'success'
-      && needs.sign-windows.result == 'success' && needs.sign-linux.result == 'success' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    environment: release
-    permissions:
-      contents: write # creates the tag's ref
-    steps:
-      - *checkout-release
-      - name: Reserve
-        run: bash .github/release/reserve-tag.sh
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
-          SHA: ${{ github.sha }}
+  # ---- Publish: environment release; only .github/release/ is checked out; artifacts are data -----------------------
 
   # The job's OIDC token is the only credential; the service checks it against its registry entry for opencode-console
-  # (this repository and workflow, environment release, dev for channel dev and production for stable and beta).
+  # (this repository, release.yml, refs/heads/dev and environment release). A check run trades it for a publish
+  # session too, then stops short of uploading.
   publish-release-service:
     name: Publish to the release service
-    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux, reserve-tag]
-    # Dev skips signing; every other run needs all three signed, and stable its tag reserved.
+    needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux]
+    # Dev skips signing; every other run needs all three signed.
     if: >-
       ${{ !cancelled() && needs.build.result == 'success' && needs.build-binaries.result == 'success'
-      && (needs.plan.outputs.mode == 'dev' || (needs.sign-macos.result == 'success'
-      && needs.sign-windows.result == 'success' && needs.sign-linux.result == 'success'))
-      && (needs.plan.outputs.mode != 'stable' || needs.reserve-tag.result == 'success') }}
+      && (needs.plan.outputs.signed != 'true' || (needs.sign-macos.result == 'success'
+      && needs.sign-windows.result == 'success' && needs.sign-linux.result == 'success')) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'release' || '' }}
+    environment: release
     permissions:
       contents: read
-      id-token: write
+      id-token: write # the release service's sign-in
     steps:
       - *checkout-release
+      # Every artifact the run made is named with its producer's digest, and verify-artifacts.sh requires each of them;
+      # a signed run can't drop a signed artifact and fall back to the build's.
       - &download-all
         name: Download
         uses: ./.github/release/download
@@ -497,8 +427,36 @@ jobs:
           pattern: "{build,binaries,signed-*}"
           digests: >-
             build=${{ needs.build.outputs.digest }} binaries=${{ needs.build-binaries.outputs.digest }}
-            signed-macos=${{ needs.sign-macos.outputs.digest }} signed-windows=${{ needs.sign-windows.outputs.digest }}
-            signed-linux=${{ needs.sign-linux.outputs.digest }}
+            ${{ needs.plan.outputs.signed == 'true' && format('signed-macos={0} signed-windows={1} signed-linux={2}',
+            needs.sign-macos.outputs.digest, needs.sign-windows.outputs.digest, needs.sign-linux.outputs.digest) || '' }}
+      - name: Check the public Linux installer key
+        if: needs.plan.outputs.mode == 'stable' || needs.plan.outputs.mode == 'beta'
+        run: |
+          curl --fail --silent --show-error --retry 3 \
+            https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install > "$RUNNER_TEMP/public-install"
+          sed -n "/^LINUX_SIGNING_KEY='-----BEGIN PUBLIC KEY-----$/,/^-----END PUBLIC KEY-----'$/p" "$RUNNER_TEMP/public-install" |
+            sed "1s/^LINUX_SIGNING_KEY='//; \$s/'$//" > "$RUNNER_TEMP/installer.pub"
+          cmp .github/release/linux-signing.pub "$RUNNER_TEMP/installer.pub" || {
+            echo '::error::The public installer needs the current Linux release key before this channel can ship.'
+            exit 1
+          }
+      - name: Set up npm for stable preflight
+        if: needs.plan.outputs.mode == 'stable'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24.11.0"
+          package-manager-cache: false
+      - name: Verify npm trusted publishing before updating the stable feed
+        if: needs.plan.outputs.mode == 'stable'
+        env:
+          CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          CONSOLE_CHANNEL: stable
+          CONSOLE_NPM_TAG: latest
+          CONSOLE_DRY_RUN: "true"
+          CONSOLE_REQUIRE_SIGNED: "true"
+        run: |
+          bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build" "$RUNNER_TEMP/in/binaries" \
+            "$RUNNER_TEMP/in/signed-macos" "$RUNNER_TEMP/in/signed-windows" "$RUNNER_TEMP/in/signed-linux"
       - name: Publish
         run: |
           bash .github/release/publish-release-service.sh "$RUNNER_TEMP/in/binaries" \
@@ -510,29 +468,30 @@ jobs:
           CONSOLE_ROLLOUT: ${{ needs.plan.outputs.rollout }}
           CONSOLE_REQUIRED: ${{ needs.plan.outputs.required }}
           CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
-          CONSOLE_REQUIRE_SIGNED: ${{ needs.plan.outputs.mode != 'dev' }}
+          CONSOLE_REQUIRE_SIGNED: ${{ needs.plan.outputs.signed }}
           NOTES_URL: ${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}
 
-  # Beta and stable (and check, as a dry run), once the release service has the binaries: the platform packages
-  # @opencode/console-<target> first, then @opencode/console. Dev builds aren't published to npm.
+  # Stable (and check, as a dry run), once the release service has the binaries: the platform packages
+  # @opencode/console-<target> first, then @opencode/console. npm trusted publishing names release.yml and environment
+  # release; there is no npm token. A check run's npm publish --dry-run still trades the job's OIDC token for each
+  # package, and publish-npm.sh fails it if npm didn't accept it.
   publish-npm:
     name: Publish to npm
     needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux, publish-release-service]
-    if: ${{ !cancelled() && needs.plan.outputs.channel != 'dev' && needs.publish-release-service.result == 'success' }}
+    if: ${{ !cancelled() && needs.plan.outputs.npm_tag != '' && needs.publish-release-service.result == 'success' }}
     # Trusted publishing accepts GitHub-hosted runners only.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    environment: ${{ needs.plan.outputs.dry_run != 'true' && 'npm' || '' }}
+    environment: release
     permissions:
       contents: read
       id-token: write # npm trusted publishing and provenance
     steps:
       - *checkout-release
-      # Trusted publishing needs npm 11.5.1 or later, which current Node 24 releases ship.
+      # Trusted publishing needs npm 11.5.1 or later, which this Node ships.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24"
-          check-latest: true
+          node-version: "24.11.0"
           package-manager-cache: false
       - *download-all
       - name: Publish
@@ -546,19 +505,22 @@ jobs:
           CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
           CONSOLE_REQUIRE_SIGNED: "true"
 
-  # Tells the release service which npm version matches its release, and for stable tags the commit and makes a GitHub
-  # release with the binaries. A separate job, in environment release, since npm's job holds another environment's
-  # OIDC token.
+  # Stable only, once npm has it: tells the release service which npm version matches its release, then tags v<version>
+  # at this run's commit and makes a GitHub release with the binaries. Tagging last means a failed run never spends a
+  # version; the next dispatch counts from the same tag. A check run never gets here, and tag-release.sh refuses a dry
+  # run too.
   finish:
-    name: Record the npm release
+    name: Tag the release
     needs: [plan, build, build-binaries, sign-macos, sign-windows, sign-linux, publish-npm]
-    if: ${{ !cancelled() && needs.plan.outputs.dry_run != 'true' && needs.publish-npm.result == 'success' }}
+    if: >-
+      ${{ !cancelled() && needs.plan.outputs.mode == 'stable' && needs.plan.outputs.dry_run != 'true'
+      && needs.publish-npm.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release
     permissions:
       contents: write # the tag and the GitHub release
-      id-token: write
+      id-token: write # the release service's sign-in
     steps:
       - *checkout-release
       - *download-all
@@ -572,21 +534,22 @@ jobs:
           bash "$RUNNER_TEMP/client.sh" distribution --app opencode-console --artifact cli --channel "$CONSOLE_CHANNEL" \
             --entry "$(jq -nc --arg version "$CONSOLE_VERSION" '{kind: "npm", version: $version}')"
       - name: Tag and GitHub release
-        if: needs.plan.outputs.mode == 'stable'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           CONSOLE_VERSION: ${{ needs.plan.outputs.version }}
+          CONSOLE_DRY_RUN: ${{ needs.plan.outputs.dry_run }}
+          CONSOLE_REQUIRE_SIGNED: "true"
           SHA: ${{ github.sha }}
-        # The tag reserve-tag made at this commit; --verify-tag refuses to make one. A rerun after the release was made
-        # uploads its files again in place.
+        # --verify-tag refuses to make a tag of its own. A rerun after the release was made uploads its files again in
+        # place.
         run: |
           . .github/release/lib.sh
           files=("$RUNNER_TEMP/in/build/opencode-console-$CONSOLE_VERSION.tgz")
           for target in $TARGETS; do
             files+=("$(target_file "$target" "$RUNNER_TEMP/in/binaries" "$RUNNER_TEMP/in/signed-macos" "$RUNNER_TEMP/in/signed-windows" "$RUNNER_TEMP/in/signed-linux")")
           done
-          SHA=$SHA bash .github/release/reserve-tag.sh
+          bash .github/release/tag-release.sh
           if gh release view "v$CONSOLE_VERSION" > /dev/null 2>&1; then
             gh release upload "v$CONSOLE_VERSION" --clobber "${files[@]}"
           else

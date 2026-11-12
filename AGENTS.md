@@ -3,7 +3,7 @@
 `opencode-console`, published to npm as `@opencode/console`, connects Claude Code, Pi, Codex, DeepSeek Harness and
 Hermes Agent to an OpenCode Console workspace and enforces its policies on their tool calls. It ships as a Node bundle
 (`script/build.ts`) and as eleven signed standalone binaries (`script/compile.ts`). The default branch is `dev`, and
-every push to it publishes a dev build. Beta and stable releases are dispatched from `production`.
+every push to it publishes a dev build. Beta and stable releases are dispatched from `dev` (`release.yml`).
 
 ## Where things are
 
@@ -58,8 +58,9 @@ every push to it publishes a dev build. Beta and stable releases are dispatched 
 
 ## Releases
 
-Pull requests squash-merge into `dev`, and every push to `dev` publishes a dev build. `dev` reaches `production`
-through the promotion pull request, merged with a merge commit. Stable and beta are dispatched on `production`; see
-`RELEASING.md`. Changes under `.github/` need a code owner's review, which repository admins may skip when merging a
-pull request; required `Checks` and the merge methods apply to everyone, and only admins and maintainers may merge
-into `production`.
+Pull requests squash-merge into `dev`, and every push to `dev` publishes a dev build. Stable and beta are dispatched
+on `dev` with a bump (`patch` by default, `minor` or `major`) of the latest `vX.Y.Z` tag; see `RELEASING.md`. Nothing
+commits a version back, so `package.json`'s version isn't the release's. `dev` reaches `production`, which serves the
+installers, through the promotion pull request, merged with a merge commit. Changes under `.github/` need a code
+owner's review, which repository admins may skip when merging a pull request; required `Checks` and the merge methods
+apply to everyone, and only admins and maintainers may merge into `production`.

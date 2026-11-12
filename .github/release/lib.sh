@@ -2,11 +2,12 @@
 # Shared helpers for the Console CLI's release scripts. Sourced, never executed. Ported from anomalyco/browse
 # (.github/release/lib.sh, 2b6194cf) and anomalyco/hex (a65a5e37).
 #
-# .github/release/ and .github/workflows/publish-console-cli.yml are the security boundary for releases. Jobs that hold
-# a secret, an OIDC token or a write token check out only this directory and run only these scripts, on artifacts they
-# verify against the digest of the job that made them and treat as data: they never install dependencies or execute
-# repository code or artifact contents. Every value that names a destination comes from the environment the workflow
-# sets (CONSOLE_VERSION, CONSOLE_CHANNEL, CONSOLE_NPM_TAG, CONSOLE_DRY_RUN, ...).
+# .github/release/ and .github/workflows/release.yml are the security boundary for releases. Jobs that hold a secret,
+# an OIDC token or a write token check out only this directory and run only these scripts, on artifacts they verify
+# against the digest of the job that made them and treat as data: they never install dependencies or execute
+# repository code or artifact contents. Secrets reach only the step that uses them (with-secrets.sh). Every value that
+# names a destination comes from the environment the workflow sets (CONSOLE_VERSION, CONSOLE_CHANNEL, CONSOLE_NPM_TAG,
+# CONSOLE_DRY_RUN, ...).
 
 set -euo pipefail
 # macOS /bin/bash (sign-macos.sh) is 3.2, which lacks inherit_errexit.
@@ -19,6 +20,7 @@ die() {
   exit 1
 }
 
+# A check run. It only stops publishing and tagging; signing and every artifact check run as in a release.
 dry_run() {
   [ "${CONSOLE_DRY_RUN:-false}" = true ]
 }

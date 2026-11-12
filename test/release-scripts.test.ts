@@ -1,5 +1,14 @@
 import { afterEach, expect, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -42,14 +51,23 @@ function tree(license: (file: string) => void = (file) => writeFileSync(file, "M
   return root
 }
 
-/** sign-linux.sh in a check run's dry run, which signs with a throwaway key. */
+/**
+ * sign-linux.sh as a release runs it, from a copy of the script and lib.sh whose linux-signing.pub is a key made for
+ * the test, since the script signs only with a key that matches linux-signing.pub.
+ */
 function sign(binaries: string) {
+  const scripts = temporary()
+  for (const file of ["sign-linux.sh", "lib.sh"]) copyFileSync(path.join(release, file), path.join(scripts, file))
+  const key = path.join(temporary(), "key.pem")
+  expect(Bun.spawnSync(["openssl", "genpkey", "-algorithm", "Ed25519", "-out", key]).exitCode).toBe(0)
+  const pub = Bun.spawnSync(["openssl", "pkey", "-in", key, "-pubout", "-out", path.join(scripts, "linux-signing.pub")])
+  expect(pub.exitCode).toBe(0)
   const out = path.join(temporary(), "signed")
-  const result = Bun.spawnSync(["bash", path.join(release, "sign-linux.sh"), binaries, out], {
+  const result = Bun.spawnSync(["bash", path.join(scripts, "sign-linux.sh"), binaries, out], {
     env: {
       PATH: process.env.PATH,
       HOME: process.env.HOME,
-      CONSOLE_DRY_RUN: "true",
+      CONSOLE_CLI_RELEASE_SIGNING_KEY: readFileSync(key, "utf8"),
       CONSOLE_TARGETS: "linux-x64",
       CONSOLE_VERSION: VERSION,
     },
@@ -163,12 +181,12 @@ test("refuses a release service client that isn't the pinned one, before running
   }
 })
 
-// ---- The release tag: reserved at the run's commit before anything publishes -----------------------------------------
+// ---- The release tag: made at the run's commit once the release has published ----------------------------------------
 
 const SHA = "a".repeat(40)
 const OTHER = "b".repeat(40)
 
-/** A stand-in `gh api` over a directory of refs and tag objects, as reserve-tag.sh calls it. */
+/** A stand-in `gh api` over a directory of refs and tag objects, as tag-release.sh calls it. */
 function github() {
   const state = temporary()
   mkdirSync(path.join(state, "refs"))
@@ -202,13 +220,13 @@ esac
   const object = (sha: string, type: string, target: string) =>
     writeFileSync(path.join(state, "objects", sha), JSON.stringify({ object: { type, sha: target } }))
   const reserve = (env: Record<string, string> = {}) =>
-    Bun.spawnSync(["bash", path.join(release, "reserve-tag.sh")], {
+    Bun.spawnSync(["bash", path.join(release, "tag-release.sh")], {
       env: { PATH: `${bin}:${process.env.PATH}`, CONSOLE_VERSION: VERSION, SHA, GH_REPO: "acme/cli", ...env },
     })
   return { state, tag, object, reserve }
 }
 
-test("reserves the version's tag at the run's commit", () => {
+test("tags the version at the run's commit", () => {
   const gh = github()
   expect(gh.reserve().exitCode).toBe(0)
   expect(JSON.parse(readFileSync(path.join(gh.state, "refs", `v${VERSION}`), "utf8"))).toEqual({
@@ -216,7 +234,7 @@ test("reserves the version's tag at the run's commit", () => {
   })
 })
 
-test("goes on when a rerun at the same commit finds the tag it reserved", () => {
+test("goes on when a rerun at the same commit finds the tag it made", () => {
   const gh = github()
   expect(gh.reserve().exitCode).toBe(0)
   expect(gh.reserve().exitCode).toBe(0)
