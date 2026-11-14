@@ -48,7 +48,7 @@ const catalog = {
 /**
  * A member of Acme signed in, and an empty home directory for Codex. `run` is setup's sync and refresh, and `sync` a
  * later sync's, both against a Console serving `config`, the models, `instructions` and `skills`, with `bundles` as
- * the skills' files, and `telemetry` as where usage metadata goes. `configure` and `collect` change what it serves.
+ * the skills' files, and `stats` as where usage metadata goes. `configure` and `collect` change what it serves.
  */
 function member(
   input: {
@@ -57,21 +57,19 @@ function member(
     readonly skills?: readonly unknown[]
     readonly bundles?: Record<string, unknown>
     readonly codexModels?: unknown
-    readonly telemetry?: unknown
+    readonly stats?: unknown
   } = {},
 ) {
   const served = {
     config: input.config ?? { providers: { opencode: {} } },
-    telemetry: input.telemetry,
+    stats: input.stats,
     watches: false,
   }
   const console = fakeConsole({
     // The Console offers event watches in a header beside the config (`ConsoleClient.watchesHeader`).
     config: () => Response.json(served.config, { headers: served.watches ? { "x-opencode-event-watches": "1" } : {} }),
-    telemetry: () =>
-      served.telemetry === undefined
-        ? Response.json({ _tag: "NotFound" }, { status: 404 })
-        : Response.json(served.telemetry),
+    stats: () =>
+      served.stats === undefined ? Response.json({ _tag: "NotFound" }, { status: 404 }) : Response.json(served.stats),
     models: () => Response.json(workspaceModels),
     codexModels: () => Response.json(input.codexModels ?? catalog),
     instructions: () => Response.json({ instructions: input.instructions ?? [] }),
@@ -96,8 +94,8 @@ function member(
       served.watches = watches
     },
     /** Where the Console has the member send usage metadata; undefined answers 404, collecting none. */
-    collect: (telemetry: unknown) => {
-      served.telemetry = telemetry
+    collect: (stats: unknown) => {
+      served.stats = stats
     },
     run: (environment: Record<string, string> = {}) =>
       synced(Codex.refresh(store, { paths, command, harness: "codex_cli_rs/0.167.0", environment })),
@@ -340,6 +338,73 @@ test("writes the same files when run again", async () => {
   await codex.run()
 
   expect([read(codex.paths.config), read(codex.paths.hooks)]).toEqual(before)
+})
+
+// Setup's hook command as 0.1.8 and 0.1.9 wrote it on Windows, every word double-quoted, which they couldn't tell
+// was their own.
+const windowsHook = (timeout: number) => ({
+  type: "command",
+  command:
+    '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Ada Lovelace\\AppData\\opencode-console\\cli\\index.js" "--harness" "codex_cli_rs/0.167.0" "hook" "codex"',
+  timeout,
+})
+// The same hook as setup writes it on Windows now, for the PowerShell Codex runs hooks in.
+const powershellHook =
+  "& 'C:\\Program Files\\nodejs\\node.exe' 'C:\\Users\\Ada O''Brien\\opencode-console\\cli\\index.js' 'hook' 'codex'; exit $LASTEXITCODE"
+
+test("writes Windows hook lines PowerShell runs as one program, keeping the CLI's exit code", () => {
+  // PowerShell reads curly quotes as single quotes too, so each is doubled, as itself.
+  expect(
+    Codex.hookLine(
+      ["C:\\Users\\O\u2019Brien\\bin\\opencode-console.exe", "\u2018a\u201Ab\u201B", "hook", "codex"],
+      "win32",
+    ),
+  ).toBe(
+    "& 'C:\\Users\\O\u2019\u2019Brien\\bin\\opencode-console.exe' '\u2018\u2018a\u201A\u201Ab\u201B\u201B' 'hook' 'codex'; exit $LASTEXITCODE",
+  )
+  expect(
+    Codex.hookLine(
+      [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Users\\Ada O'Brien\\opencode-console\\cli\\index.js",
+        "hook",
+        "codex",
+      ],
+      "win32",
+    ),
+  ).toBe(powershellHook)
+})
+
+test("collapses the hook entries a Windows setup left repeated in hooks.json to one per event", async () => {
+  const codex = member()
+  const theirs = { matcher: "Bash", hooks: [{ type: "command", command: "audit.sh" }] }
+  const repeated = (group: Record<string, unknown>) => [group, group, group]
+  write(
+    codex.paths.hooks,
+    JSON.stringify({
+      hooks: {
+        PreToolUse: [theirs, ...repeated({ matcher: "*", hooks: [windowsHook(30)] })],
+        UserPromptSubmit: repeated({ hooks: [windowsHook(30)] }),
+        SessionStart: repeated({ hooks: [windowsHook(10)] }),
+      },
+    }),
+  )
+
+  await codex.run()
+
+  const hooks = JSON.parse(read(codex.paths.hooks)).hooks
+  expect([hooks.PreToolUse.length, hooks.UserPromptSubmit.length, hooks.SessionStart.length]).toEqual([2, 1, 1])
+  expect(hooks.PreToolUse[0]).toEqual(theirs)
+})
+
+test("finds setup's hooks running when their command is a Windows PowerShell line", async () => {
+  const codex = member()
+  await codex.run()
+  const hooks = JSON.parse(read(codex.paths.hooks))
+  hooks.hooks.PreToolUse[0].hooks = [{ type: "command", command: powershellHook, timeout: 30 }]
+  write(codex.paths.hooks, JSON.stringify(hooks))
+
+  expect(Codex.hooksOff(codex.store)).toBeUndefined()
 })
 
 test("leaves config.toml as it is when nothing setup owns changed, though Codex added to it since", async () => {
@@ -593,10 +658,10 @@ test("--keep-provider keeps Codex's own sign-in while still adding hooks, rules,
   expect(read(codex.paths.memory)).toContain("Use tabs.")
 })
 
-// Where the Console has this connector send usage metadata (`GET /api/v2/telemetry`).
-const telemetry = {
+// Where the Console has this connector send usage metadata (`GET /api/v2/stats`).
+const stats = {
   otlpLogsUrl: "https://console.test/console/api/otel/v1/logs",
-  headers: { authorization: "Bearer octel_1" },
+  headers: { authorization: "Bearer ocstats_1" },
 }
 // The usage hook, as Codex's `/hooks` lists it: synchronous, so Codex ends the session only after it has returned.
 const usageHook = {
@@ -606,7 +671,7 @@ const usageHook = {
 } as const
 
 test("reports each model response's token counts with an approved synchronous hook while Codex keeps its own sign-in", async () => {
-  const codex = member({ telemetry })
+  const codex = member({ stats })
 
   const applied = await codex.keep()
 
@@ -618,7 +683,7 @@ test("reports each model response's token counts with an approved synchronous ho
 })
 
 test("replaces an async usage hook and its approval with the synchronous one, so Codex runs the hook and honours it", async () => {
-  const codex = member({ telemetry })
+  const codex = member({ stats })
   await codex.keep()
   // What an earlier setup wrote before the hook was synchronous.
   const asyncHook = { ...usageHook, async: true }
@@ -638,7 +703,7 @@ test("replaces an async usage hook and its approval with the synchronous one, so
 })
 
 test("adds no usage hook to a Codex that uses the gateway, which counts its requests already", async () => {
-  const codex = member({ telemetry })
+  const codex = member({ stats })
 
   const applied = await codex.run()
 
@@ -654,7 +719,7 @@ test("adds no usage hook while the workspace collects no usage metadata", async 
 })
 
 test("takes the usage hook and its approval out once the workspace stops collecting usage metadata", async () => {
-  const codex = member({ config: {}, telemetry })
+  const codex = member({ config: {}, stats })
   await codex.keep()
 
   codex.collect(undefined)
@@ -665,15 +730,15 @@ test("takes the usage hook and its approval out once the workspace stops collect
 })
 
 test("writes no token to config.toml", async () => {
-  const codex = member({ config: {}, telemetry })
+  const codex = member({ config: {}, stats })
 
   await codex.keep()
 
-  expect([read(codex.paths.config).includes("octel_1"), toml(codex.paths.config, "otel")]).toEqual([false, undefined])
+  expect([read(codex.paths.config).includes("ocstats_1"), toml(codex.paths.config, "otel")]).toEqual([false, undefined])
 })
 
 test("removes an [otel] table an earlier setup recorded as its own", async () => {
-  const codex = member({ config: {}, telemetry })
+  const codex = member({ config: {}, stats })
   write(codex.paths.config, '# mine\nmodel = "o3"\n')
   await codex.keep()
   const manifest = JSON.parse(read(Codex.manifestFile(codex.store)))

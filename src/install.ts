@@ -1,6 +1,6 @@
 export * as CliInstall from "./install"
 
-import { spawnSync } from "node:child_process"
+import { execFile, spawnSync } from "node:child_process"
 import { createHash, randomUUID } from "node:crypto"
 import {
   chmodSync,
@@ -104,10 +104,14 @@ export function install(
   platform: NodeJS.Platform = process.platform,
 ): readonly string[] {
   const target = directory(store)
+  const before = receipt(store)
+  // The build kept for a rollback is the last that worked on this channel. Setup moving the install to another one
+  // drops it, so a crashing stable build can't roll back to an unsigned dev build kept from before.
+  if (before !== undefined && before.channel !== channelOf(version))
+    rmSync(previousDirectory(store), { recursive: true, force: true })
   if (running.entry === undefined) {
     const built = BuildInfo.target()
     // Run again from the installed binary, setup still knows which release archive that came from.
-    const before = receipt(store)
     // Only a SHA-256: anything else in the receipt would leave it unreadable, and the install unable to update.
     const sha256 =
       (running.sha256 !== undefined && /^[0-9a-f]{64}$/.test(running.sha256) ? running.sha256 : undefined) ??
@@ -284,7 +288,7 @@ export function activateBundle(store: ConsoleStore.Info, staged: string) {
  */
 export function restore(store: ConsoleStore.Info, platform = process.platform) {
   const installed = receipt(store)
-  const previous = receipt(store, previousDirectory(store))
+  const previous = previousReceipt(store)
   if (!installed || !previous || previous.method !== installed.method) return undefined
   if (installed.method === "npm-bundle") {
     const retired = `${directory(store)}.${randomUUID()}.old`
@@ -304,11 +308,23 @@ export function restore(store: ConsoleStore.Info, platform = process.platform) {
 
 /** The command that runs the last binary or bundle that worked, for its self-test before a rollback. */
 export function previousCommand(store: ConsoleStore.Info, platform = process.platform) {
-  const previous = receipt(store, previousDirectory(store))
+  const previous = previousReceipt(store)
   if (!previous) return undefined
   return previous.method === "direct"
     ? [path.join(previousDirectory(store), binaryName(platform))]
     : [previous.node ?? "node", path.join(previousDirectory(store), "index.js")]
+}
+
+/**
+ * The receipt of the build kept for a rollback, when it's from the installed build's channel. One from another channel
+ * is never run, not even for its self-test, whatever left it there.
+ */
+function previousReceipt(store: ConsoleStore.Info) {
+  const installed = receipt(store)
+  const previous = receipt(store, previousDirectory(store))
+  return previous !== undefined && installed !== undefined && previous.channel === installed.channel
+    ? previous
+    : undefined
 }
 
 /** The SHA-256 of a file, in hex. */
@@ -369,6 +385,31 @@ export function uninstall(store: ConsoleStore.Info) {
 
 function writeReceipt(directory: string, value: Receipt) {
   ConsoleStore.write(receiptFile(directory), `${JSON.stringify(value, null, 2)}\n`)
+}
+
+/** A coding agent's version, which names it to the Console, or undefined when it isn't installed. */
+export function agentVersion(binary: string) {
+  const probe = versionProbe(binary)
+  return new Promise<string | undefined>((resolve) =>
+    execFile(probe.file, probe.args, { ...probe.options, timeout: 10_000, windowsHide: true }, (error, stdout) =>
+      resolve(error ? undefined : stdout.match(/\d+\.\d+\.\d+\S*/)?.[0]),
+    ),
+  )
+}
+
+/**
+ * How `agentVersion` runs `<binary> --version`. On Windows that takes a shell, since npm installs agents as `.cmd`
+ * shims, and `cmd.exe` looks for a program in the current directory before `PATH` unless
+ * `NoDefaultCurrentDirectoryInExePath` is set, so setup in a project holding its own `codex.cmd` would run that.
+ */
+export function versionProbe(
+  binary: string,
+  platform = process.platform,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+) {
+  if (platform !== "win32") return { file: binary, args: ["--version"], options: { env } }
+  const shimEnv: Record<string, string | undefined> = { ...env, NoDefaultCurrentDirectoryInExePath: "1" }
+  return { file: `${binary} --version`, args: [], options: { shell: true, env: shimEnv } }
 }
 
 // What a command printed, either stream and whatever its exit code: musl's `ldd --version` says so on stderr and exits 1.

@@ -16,6 +16,11 @@ import { version } from "../package.json" with { type: "json" }
 import { CliInstall } from "../src/install"
 import { removeStores, temporaryStore } from "./support/console"
 
+// A release stamps package.json before its tests run, so a dev or beta build's own version names its channel.
+const channel = CliInstall.channelOf(version)
+const other = channel === "dev" ? "stable" : "dev"
+const otherVersion = other === "dev" ? "0.1.8-dev.4" : "0.1.8"
+
 const roots: string[] = []
 afterEach(() => {
   removeStores()
@@ -147,7 +152,7 @@ test("leaves a receipt for the npm copy, naming the Node that runs it, so it can
   expect(CliInstall.receipt(store)).toEqual({
     method: "npm-bundle",
     version,
-    channel: "stable",
+    channel,
     node: "/opt/node/bin/node",
   })
 })
@@ -160,7 +165,43 @@ test("leaves a receipt for a binary, with the release archive it came from", () 
 
   CliInstall.install(store, { execPath: path.join(root, "opencode-console"), sha256: "a".repeat(64) })
 
-  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel: "stable", sha256: "a".repeat(64) })
+  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel, sha256: "a".repeat(64) })
+})
+
+test("drops the build kept for a rollback when setup moves the install to another channel", () => {
+  const store = temporaryStore()
+  const root = mkdtempSync(path.join(os.tmpdir(), "opencode-console-bin-"))
+  roots.push(root)
+  writeFileSync(path.join(root, "opencode-console"), "binary")
+  const kept = CliInstall.previousDirectory(store)
+  mkdirSync(kept, { recursive: true })
+  writeFileSync(path.join(kept, "opencode-console"), "a build from the other channel")
+  const previous = { method: "direct", version: otherVersion, channel: other }
+  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(previous))
+  mkdirSync(CliInstall.directory(store), { recursive: true })
+  writeFileSync(CliInstall.receiptFile(CliInstall.directory(store)), JSON.stringify(previous))
+
+  CliInstall.install(store, { execPath: path.join(root, "opencode-console") })
+
+  expect(CliInstall.receipt(store)).toMatchObject({ channel })
+  expect(existsSync(kept)).toBe(false)
+})
+
+test("keeps the build kept for a rollback when setup runs again on the same channel", () => {
+  const store = temporaryStore()
+  const root = mkdtempSync(path.join(os.tmpdir(), "opencode-console-bin-"))
+  roots.push(root)
+  writeFileSync(path.join(root, "opencode-console"), "binary")
+  const kept = CliInstall.previousDirectory(store)
+  mkdirSync(kept, { recursive: true })
+  const same = { method: "direct", version: channel === "dev" ? "0.1.8-dev.4" : "0.1.8", channel }
+  writeFileSync(CliInstall.receiptFile(kept), JSON.stringify(same))
+  mkdirSync(CliInstall.directory(store), { recursive: true })
+  writeFileSync(CliInstall.receiptFile(CliInstall.directory(store)), JSON.stringify({ ...same, version }))
+
+  CliInstall.install(store, { execPath: path.join(root, "opencode-console") })
+
+  expect(CliInstall.receipt(store, kept)).toMatchObject(same)
 })
 
 test("names a dev build's channel dev, so it follows dev builds", () => {
@@ -328,5 +369,27 @@ test("leaves out of the receipt an archive SHA-256 that isn't one, so the instal
 
   CliInstall.install(store, { execPath: path.join(root, "opencode-console"), sha256: "ABC " })
 
-  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel: "stable" })
+  expect(CliInstall.receipt(store)).toEqual({ method: "direct", version, channel })
+})
+
+test("asks a Windows agent's npm shim its version through cmd.exe, which mustn't look in the project first", () => {
+  expect(CliInstall.versionProbe("codex", "win32", { PATH: "C:\\npm" })).toEqual({
+    file: "codex --version",
+    args: [],
+    options: { shell: true, env: { PATH: "C:\\npm", NoDefaultCurrentDirectoryInExePath: "1" } },
+  })
+  expect(CliInstall.versionProbe("codex", "linux", { PATH: "/usr/bin" })).toEqual({
+    file: "codex",
+    args: ["--version"],
+    options: { env: { PATH: "/usr/bin" } },
+  })
+})
+
+test("reads an agent's version without a shell, or none when it isn't installed", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "opencode-console-agent-"))
+  roots.push(root)
+  const agent = path.join(root, "codex; echo 9.9.9")
+  writeFileSync(agent, "#!/bin/sh\necho 'codex-cli 0.167.0'\n", { mode: 0o755 })
+  expect(await CliInstall.agentVersion(agent)).toBe("0.167.0")
+  expect(await CliInstall.agentVersion(path.join(root, "missing"))).toBeUndefined()
 })

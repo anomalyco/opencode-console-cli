@@ -377,11 +377,13 @@ async function watching(
     readonly watches?: boolean
     readonly config?: Record<string, unknown>
     readonly listed?: ReadonlyArray<Record<string, unknown>>
+    /** Answers each new watch, as `serveConsole`'s `create` does. */
+    readonly create?: () => Response
   } = {},
 ) {
   const sockets = inbox<{ send: (frame: string) => void }>()
   const console = serveConsole(
-    { watches: { watches: options.listed ?? [] } },
+    { watches: { watches: options.listed ?? [], ...(options.create ? { create: options.create } : {}) } },
     { open: (socket) => sockets.push(socket) },
   )
   cleanup.push(console.stop)
@@ -532,6 +534,47 @@ test("watches the pull request a bash command's `gh pr create` printed, for the 
   expect(console.state.created).toEqual([
     { sessionID: session.sessionId, target: "https://github.com/acme/app/pull/7" },
   ])
+})
+
+test("tells the agent why Console refused to watch the pull request a bash command's `gh pr create` printed", async () => {
+  const texts: string[] = []
+  const { session, console } = await watching(
+    [
+      fauxAssistantMessage(
+        [fauxToolCall("bash", { command: "printf 'https://github.com/acme/app/pull/7\\n' || gh pr create --fill" })],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("opened"),
+      (context) => {
+        texts.push(
+          ...context.messages.flatMap((message) =>
+            message.role !== "user"
+              ? []
+              : typeof message.content === "string"
+                ? [message.content]
+                : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])),
+          ),
+        )
+        return fauxAssistantMessage("ok")
+      },
+    ],
+    {
+      create: () =>
+        Response.json(
+          { _tag: "WatchRefused", message: "GitHub isn't available to your account in this workspace." },
+          { status: 403 },
+        ),
+    },
+  )
+
+  await session.prompt("open a pull request")
+  await until(() => console.state.created.length === 1)
+  await until(() => session.messages.some((message) => message.role === "custom"))
+  await session.prompt("next")
+
+  expect(texts).toContain(
+    "OpenCode Console can't watch this, so changes to it won't wake this session. Tell the user why: GitHub isn't available to your account in this workspace.",
+  )
 })
 
 test("the watch tool watches its target for the session that called it", async () => {

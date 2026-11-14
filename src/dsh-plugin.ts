@@ -369,9 +369,17 @@ function watching(ctx: Pick<Context, "get">, state: InProcess.Session) {
     return live ? conversation(live) : parent
   }
 
-  /** Watches `target` for the session whose tool call started it; it runs beside the call, which never waits on it. */
+  /**
+   * Watches `target` for the session whose tool call started it; it runs beside the call, which never waits on it. A
+   * refusal tells the session's agent why (`ConsoleWatches.watchStarted`).
+   */
   const watch = (sessionID: string, target: string | EventWatch.Target, mode?: "once") =>
-    void state.run(ConsoleWatches.create(state.store, sessionID, target, mode)).catch(() => undefined)
+    void state
+      .run(ConsoleWatches.watchStarted(state.store, sessionID, target, mode))
+      .then((created) => {
+        if (created.notice !== undefined) ctx.get("agents")?.get(sessionID)?.inject(refusal(created.notice))
+      })
+      .catch(() => undefined)
 
   return {
     /** Holds the event connection while `snapshot` offers event watches, and closes it once not. */
@@ -438,6 +446,16 @@ function watching(ctx: Pick<Context, "get">, state: InProcess.Session) {
 }
 
 const decodeText = Schema.decodeUnknownOption(Schema.Struct({ text: Schema.String }))
+
+/** Why Console didn't watch what a session's tool call started, as its agent takes it with its next request. */
+function refusal(text: string): Notice {
+  return {
+    id: crypto.randomUUID(),
+    role: "user",
+    content: [{ type: "text", text }],
+    source: { kind: WATCH_SOURCE, form: "notice", summary: "OpenCode Console can't watch this" },
+  }
+}
 
 /** A watched update for one session, as its agent takes it. */
 function notice(events: ReadonlyArray<ConsoleWatches.WatchEvent>, wake: ConsoleWatches.Wake): Notice {

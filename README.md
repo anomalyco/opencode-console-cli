@@ -1,5 +1,8 @@
 # @opencode/console
 
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-works-with-g-dark-20.svg"><img alt="Works with OpenCode" src="https://opencode.ai/brand/badges/opencode-works-with-g-light-20.svg" height="20" /></picture></a>
+
 Connects Claude Code, Pi, Codex, DeepSeek Harness and Hermes Agent to an OpenCode Console workspace. They then use the
 workspace's models and any MCP servers, skills and instructions it has, and their tool calls follow the workspace's
 policies. OpenCode connects to Console on its own, so OpenCode users don't need this package.
@@ -16,13 +19,13 @@ or later, and installs the signed `opencode-console` binary for your computer, w
 ## Install without Node
 
 ```sh
-curl -fsSL https://opencode.ai/console/install | sh -s -- setup claude-code
+curl -fsSL https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install | sh -s -- setup claude-code
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm https://opencode.ai/console/install.ps1))) setup claude-code
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install.ps1))) setup claude-code
 ```
 
 The installer downloads the binary for your computer from Anomaly's release service (`https://anoma.ly/release`), checks
@@ -58,12 +61,12 @@ npx @opencode/console setup hermes --keep-provider
 ```
 
 Claude Code or Codex keeps your own sign-in and models, and still gets the workspace's policies, plus any MCP servers,
-skills and instructions the workspace has. If the workspace counts usage from members' own subscriptions, Claude Code
-and Codex send Console token counts and model names, never prompts or code. Codex reports them from a hook after each
-model response; it needs Codex 0.164.0 or later. If you've already set an OpenTelemetry endpoint for Claude Code, setup
-leaves it in place and Claude Code sends Console no usage. `npx @opencode/console status` shows which applies. Hermes
-keeps its own providers and models the same way, and sends no usage. Run setup without `--keep-provider` to use the
-workspace's models again.
+skills and instructions the workspace has. They then report each request's token counts and model to the workspace,
+which counts them in its usage and the Leaderboard's Tokens ranking at $0. They never send prompts or code. Codex
+reports them from a hook after each model response; it needs Codex 0.164.0 or later. An OpenTelemetry endpoint you
+already set for Claude Code stays yours, and Claude Code reports nothing to the workspace.
+`npx @opencode/console status` shows which applies. Hermes keeps its own providers and models the same way, and sends
+no usage. Run setup without `--keep-provider` to use the workspace's models again.
 
 ## Set up DeepSeek Harness
 

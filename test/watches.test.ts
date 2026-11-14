@@ -889,6 +889,41 @@ test("refuses to stop another session's watch", async () => {
   ])
 })
 
+test("tells the agent to sign in again, with the command, when Console ended the sign-in", async () => {
+  const console = fakeConsole({
+    watches: { refuse: () => Response.json({ _tag: "Unauthorized" }, { status: 401 }) },
+  })
+  const store = temporaryStore()
+  save(store, signIn(console, Number.MAX_SAFE_INTEGER))
+
+  const response = await mcp(console, store, toolCall("watches", {}, { "ai.opencode/sessionID": "ses_a" }))
+
+  expect(response).toMatchObject({
+    result: {
+      content: [{ text: "Signed out of OpenCode Console. Run `npx @opencode/console login` to sign in again" }],
+      isError: true,
+    },
+  })
+})
+
+test("tells the agent to sign in with SSO again when the workspace's SSO session expired", async () => {
+  const console = fakeConsole({
+    watches: { refuse: () => Response.json({ _tag: "SsoRequired", orgId: "org_acme" }, { status: 403 }) },
+  })
+  const store = temporaryStore()
+  save(store, signIn(console, Number.MAX_SAFE_INTEGER))
+
+  const response = await mcp(
+    console,
+    store,
+    toolCall("watch", { target: "acme/app#7" }, { "ai.opencode/sessionID": "ses_a" }),
+  )
+
+  expect(response).toMatchObject({
+    result: { content: [{ text: "Sign in with SSO again to use Acme" }], isError: true },
+  })
+})
+
 test("watches one event type of a workspace's MCP server with its arguments, and names it back", async () => {
   const { console, store } = watching()
 
@@ -1056,4 +1091,30 @@ test("tells a harness that can't wake its sessions that an idle session gets upd
     others.includes("waits for the user's next prompt"),
   ]).toEqual([true, false])
   expect(codex).not.toContain("The session wakes with the update")
+})
+
+test("tells the agent once per session why Console refused a watch made on its own, and nothing when Console fails", async () => {
+  const refusal = "GitHub isn't available to your account in this workspace."
+  const answer = { now: () => Response.json({ _tag: "WatchRefused", message: refusal }, { status: 403 }) }
+  const { store } = served({ watches: { create: () => answer.now() } })
+  const started = (sessionID: string) => live(ConsoleWatches.watchStarted(store, sessionID, "acme/app#7"))
+
+  const first = await started("ses_a")
+  const again = await started("ses_a")
+  const other = await started("ses_b")
+  answer.now = () => Response.json({ _tag: "UnknownError", message: "Down for a moment" }, { status: 503 })
+  const outage = await started("ses_c")
+
+  expect([first, again, other, outage]).toEqual([
+    {
+      watched: false,
+      notice: `OpenCode Console can't watch this, so changes to it won't wake this session. Tell the user why: ${refusal}`,
+    },
+    { watched: false },
+    {
+      watched: false,
+      notice: `OpenCode Console can't watch this, so changes to it won't wake this session. Tell the user why: ${refusal}`,
+    },
+    { watched: false },
+  ])
 })

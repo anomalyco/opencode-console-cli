@@ -246,9 +246,10 @@ async function claudePrompt(event: ClaudeCodeHook.Event) {
 }
 
 /**
- * Claude Code's event watch hooks (`ClaudeCodeWatches`): `PostToolUse` and `SessionEnd`, and `Stop`, which waits in
- * the background for the session's next update and exits 2 with it, which wakes Claude (`asyncRewake`). They never
- * block or wake anything by failing: whatever goes wrong, they print nothing and exit 0.
+ * Claude Code's event watch hooks (`ClaudeCodeWatches`): `PostToolUse`, which tells Claude when Console refused a
+ * watch, and `SessionEnd`, and `Stop`, which waits in the background for the session's next update and exits 2 with
+ * it, which wakes Claude (`asyncRewake`). They never block or wake anything by failing: whatever goes wrong, they
+ * print nothing and exit 0.
  */
 async function claudeWatchHook(text: string): Promise<number> {
   const outcome = await Promise.resolve()
@@ -262,7 +263,15 @@ async function claudeWatchHook(text: string): Promise<number> {
       if (!event) return undefined
       const store = ConsoleStore.make()
       if (event.hook_event_name === "PostToolUse") {
-        await withConsole(ClaudeCodeWatches.postToolUse(store, event, ClaudeCode.ownServers(store).gateway))
+        const context = await withConsole(
+          ClaudeCodeWatches.postToolUse(store, event, ClaudeCode.ownServers(store).gateway),
+        )
+        // Claude Code hands a background hook's `additionalContext` to Claude on its next turn.
+        if (context)
+          await flush(
+            process.stdout,
+            JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: context } }),
+          )
         return undefined
       }
       if (event.hook_event_name === "SessionEnd") {
@@ -372,8 +381,8 @@ async function codexWatchHook(text: string): Promise<number> {
 }
 
 /**
- * Codex's `PostModelRequest` hook, which setup registers only while Codex keeps its own sign-in and the workspace
- * collects usage: reports the response's token counts with the stored workspace config's telemetry token, and nothing
+ * Codex's `PostModelRequest` hook, which setup registers only while Codex keeps its own sign-in and there's a stats
+ * target: reports the response's token counts with the stored workspace config's stats token, and nothing
  * else. The hook is synchronous, so it starts a process of its own to send the report and returns at once; whatever
  * happens it prints nothing and exits 0.
  */
@@ -381,7 +390,7 @@ async function codexUsage(text: string) {
   await Promise.resolve()
     .then(async () => {
       const { CodexUsage } = await import("./codex-usage")
-      CodexUsage.reportInBackground(text, await codexUsageTelemetry(), {
+      CodexUsage.reportInBackground(text, await codexUsageStats(), {
         version: harness?.match(/^codex_cli_rs\/(.+)$/)?.[1],
         now: Date.now(),
         command: ownCommand(),
@@ -393,21 +402,21 @@ async function codexUsage(text: string) {
 
 /**
  * Posts one usage report the hook built, in a process of its own so the hook returns at once. Only `hook codex` starts
- * it: the OTLP body arrives on stdin and the telemetry comes from the stored workspace config, so no token appears on a
+ * it: the OTLP body arrives on stdin and the stats target comes from the stored workspace config, so no token appears on a
  * command line `ps` would show. Whatever happens it prints nothing and exits 0.
  */
 async function reportCodexUsage() {
   await Promise.resolve()
     .then(async () => {
       const { CodexUsage } = await import("./codex-usage")
-      await CodexUsage.post(await stdin(), await codexUsageTelemetry())
+      await CodexUsage.post(await stdin(), await codexUsageStats())
     })
     .catch(() => undefined)
   return 0
 }
 
 /** Where the stored workspace has this connector send usage metadata, or undefined while no such workspace is signed in. */
-async function codexUsageTelemetry() {
+async function codexUsageStats() {
   const { ConsoleStore } = await import("./store")
   const { ConsoleCredentials } = await import("./credentials")
   const { WorkspaceSnapshot } = await import("./snapshot")
@@ -415,7 +424,7 @@ async function codexUsageTelemetry() {
   const credential = ConsoleCredentials.read(store)
   const snapshot = credential && WorkspaceSnapshot.read(store)
   if (!credential || snapshot?.owner !== ConsoleCredentials.owner(credential)) return undefined
-  return snapshot.telemetry
+  return snapshot.stats
 }
 
 async function sessionStart() {
@@ -595,7 +604,7 @@ async function setup() {
   const { ConsoleClient } = await import("./console-client")
   // Asked first, so the very first config fetch names the agent to the Console, by the product token it sends itself.
   // Hermes's version can carry git build metadata (`0.23.0+12.ge075441`), which its own requests leave out.
-  const found = await agentVersion(pi ? "pi" : codex ? "codex" : dsh ? "dsh" : hermes ? "hermes" : "claude")
+  const found = await CliInstall.agentVersion(pi ? "pi" : codex ? "codex" : dsh ? "dsh" : hermes ? "hermes" : "claude")
   const agent = hermes ? found?.replace(/\+.*$/, "") : found
   if (agent)
     harness = pi
@@ -1044,7 +1053,7 @@ async function mcpWatches() {
  * Claude Code's hooks keep that fresh while it runs (every session start, and each minute it's in use), and the
  * Console's token stays valid for weeks, so this asks the Console itself only when there's no stored config for the
  * sign-in or it's a day old. Claude Code shows a warning when the helper fails, so signed out, offline with no stored
- * config, or with the workspace collecting nothing, it prints `{}` and still exits 0.
+ * config, or with no stats target, it prints `{}` and still exits 0.
  */
 async function otelHeaders() {
   const { ConsoleStore } = await import("./store")
@@ -1057,8 +1066,8 @@ async function otelHeaders() {
       if (!credential) return undefined
       await noticeHooks()
       const stored = WorkspaceSync.current(store, ConsoleCredentials.owner(credential))
-      if (stored && Date.now() - stored.fetched < 86_400_000) return stored.telemetry?.headers
-      return (await withConsole(WorkspaceSync.sync(store))).snapshot?.telemetry?.headers
+      if (stored && Date.now() - stored.fetched < 86_400_000) return stored.stats?.headers
+      return (await withConsole(WorkspaceSync.sync(store))).snapshot?.stats?.headers
     })
     .catch(() => undefined)
   process.stdout.write(`${JSON.stringify(headers ?? {})}\n`)
@@ -1453,16 +1462,6 @@ async function refuse(reason: string) {
   process.stdout.write(answer.stdout)
   process.stderr.write(answer.stderr)
   return answer.code
-}
-
-// A coding agent's version, which names it to the Console, or undefined when it isn't installed.
-async function agentVersion(binary: string) {
-  const { execFile } = await import("node:child_process")
-  return new Promise<string | undefined>((resolve) =>
-    execFile(binary, ["--version"], { timeout: 10_000 }, (error, stdout) =>
-      resolve(error ? undefined : stdout.match(/\d+\.\d+\.\d+\S*/)?.[0]),
-    ),
-  )
 }
 
 /** Answers a check with a denial: the decision on stdout, exit code 2. */
