@@ -1,5 +1,8 @@
 # @opencode/console
 
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
+<a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-works-with-g-dark-20.svg"><img alt="Works with OpenCode" src="https://opencode.ai/brand/badges/opencode-works-with-g-light-20.svg" height="20" /></picture></a>
+
 Connects Claude Code, Pi, Codex, DeepSeek Harness and Hermes Agent to an OpenCode Console workspace. They then use the
 workspace's models and any MCP servers, skills and instructions it has, and their tool calls follow the workspace's
 policies. OpenCode connects to Console on its own, so OpenCode users don't need this package.
