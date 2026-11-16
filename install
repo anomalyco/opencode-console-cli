@@ -215,7 +215,8 @@ openssl_ed25519() {
 
 # Before anything from the download runs. Dev builds aren't signed, but a signature one carries must hold.
 if [ "$os" = darwin ] && [ "$channel" != dev ]; then
-    /usr/bin/codesign --verify --strict "-R=$MACOS_REQUIREMENT" "$binary" 2>/dev/null ||
+    # A bare binary has no stapled ticket, so codesign only finds it online, and only when asked to.
+    /usr/bin/codesign --verify --strict --check-notarization "-R=$MACOS_REQUIREMENT" "$binary" 2>/dev/null ||
         fail "opencode-console $version isn't signed and notarized by Anomaly; nothing was installed"
 elif [ "$os" = linux ]; then
     if [ -f "$binary.sig" ] && openssl_ed25519; then

@@ -5,8 +5,8 @@ export * as Signature from "./signature"
 // (a65a5e37): `src/updater/macos.rs`'s code-signing requirement and `src/updater/linux.rs`'s ed25519 check, with the
 // message and key layout of `.github/release/sign-linux.sh`.
 //
-//   macOS    `codesign --verify --strict -R=<requirement>`: a Developer ID from Anomaly's team, identified as
-//            `anomaly.opencode-console`, and notarized
+//   macOS    `codesign --verify --strict --check-notarization -R=<requirement>`: a Developer ID from Anomaly's team,
+//            identified as `anomaly.opencode-console`, and notarized (a bare binary's ticket is only found online)
 //   Linux    `package/bin/opencode-console.sig`: ed25519 by Anomaly's release key over the binary's SHA-256
 //   Windows  Authenticode: Valid, by Anomaly's Artifact Signing certificate (Hex's `windows.rs` pins the same signer)
 //
@@ -92,10 +92,14 @@ export function verifyLinux(binary: string, channel: CliInstall.Channel, key = L
 /** macOS: `codesign` against `requirement`, without running the binary. */
 export function verifyMacos(binary: string, requirement = MACOS_REQUIREMENT) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn("/usr/bin/codesign", ["--verify", "--strict", `-R=${requirement}`, binary], {
-      stdio: ["ignore", "ignore", "pipe"],
-      env: UpdateEnvironment.tool(),
-    })
+    const child = spawn(
+      "/usr/bin/codesign",
+      ["--verify", "--strict", "--check-notarization", `-R=${requirement}`, binary],
+      {
+        stdio: ["ignore", "ignore", "pipe"],
+        env: UpdateEnvironment.tool(),
+      },
+    )
     const errors: Buffer[] = []
     const timer = setTimeout(() => child.kill("SIGKILL"), 60_000)
     child.stderr.on("data", (chunk: Buffer) => errors.push(chunk))
