@@ -66,25 +66,36 @@ export const sync = Effect.fn("WorkspaceSync.sync")(function* (
   if (previous && !options.force && !WorkspaceSnapshot.stale(previous, now)) return { snapshot: previous }
 
   // Instructions, skills and the usage export's target that fail to load keep the last ones, as the config does,
-  // without holding up the config. A 404 for the target means the workspace collects nothing, which clears it.
+  // without failing the config. A 404 for the target means the Console gives this caller none, which clears it.
+  // Instructions and skills are read only when the config's answer says the caller has them; otherwise there are none.
   const outcome = yield* ConsoleCredentials.fresh(store).pipe(
     Effect.flatMap((credential) =>
       credential
         ? Effect.all(
             {
-              config: ConsoleClient.fetchConfig(credential),
-              instructions: ConsoleClient.fetchInstructions(credential).pipe(
-                Effect.map((answer) => answer.instructions),
-                Effect.orElseSucceed(() => previous?.instructions),
+              config: ConsoleClient.fetchConfig(credential).pipe(
+                Effect.flatMap((config) =>
+                  config.instructionsSkills
+                    ? Effect.all(
+                        {
+                          instructions: ConsoleClient.fetchInstructions(credential).pipe(
+                            Effect.map((answer) => answer.instructions),
+                            Effect.orElseSucceed(() => previous?.instructions),
+                          ),
+                          skills: ConsoleClient.fetchSkills(credential).pipe(
+                            Effect.map((answer) => answer.skills),
+                            Effect.orElseSucceed(() => previous?.skills),
+                          ),
+                        },
+                        { concurrency: "unbounded" },
+                      ).pipe(Effect.map((lists) => ({ config, ...lists })))
+                    : Effect.succeed({ config, instructions: [], skills: [] }),
+                ),
               ),
-              skills: ConsoleClient.fetchSkills(credential).pipe(
-                Effect.map((answer) => answer.skills),
-                Effect.orElseSucceed(() => previous?.skills),
-              ),
-              telemetry: ConsoleClient.fetchTelemetry(credential).pipe(Effect.orElseSucceed(() => previous?.telemetry)),
+              stats: ConsoleClient.fetchStats(credential).pipe(Effect.orElseSucceed(() => previous?.stats)),
             },
             { concurrency: "unbounded" },
-          ).pipe(Effect.map((fetched) => ({ credential, ...fetched })))
+          ).pipe(Effect.map((fetched) => ({ credential, stats: fetched.stats, ...fetched.config })))
         : Effect.succeed(undefined),
     ),
     Effect.result,
@@ -101,7 +112,7 @@ export const sync = Effect.fn("WorkspaceSync.sync")(function* (
         watches: fetched.config.watches,
         ...(fetched.instructions === undefined ? {} : { instructions: fetched.instructions }),
         ...(fetched.skills === undefined ? {} : { skills: fetched.skills }),
-        ...(fetched.telemetry === undefined ? {} : { telemetry: fetched.telemetry }),
+        ...(fetched.stats === undefined ? {} : { stats: fetched.stats }),
       }),
     }
   }

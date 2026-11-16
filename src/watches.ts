@@ -54,8 +54,14 @@ export interface Subscription {
 
 const decodeServerMessage = Schema.decodeUnknownOption(Schema.fromJsonString(ServerMessage))
 
-/** The Console refused a watch request, or there's no sign-in to make one with; `message` says why, for the agent. */
-export class Failed extends Data.TaggedError("ConsoleWatches.Failed")<{ readonly message: string }> {}
+/**
+ * The Console refused a watch request, or there's no sign-in to make one with; `message` says why, for the agent.
+ * `refused` when Console said the member can't watch it (`WatchRefused`), which trying again won't change.
+ */
+export class Failed extends Data.TaggedError("ConsoleWatches.Failed")<{
+  readonly message: string
+  readonly refused?: true
+}> {}
 
 /**
  * Watches `target` for `sessionID`: a Slack or GitHub link or shorthand the Console reads, a target itself, or one
@@ -78,6 +84,33 @@ export const create = (
     ...(minutes === undefined ? {} : { minutes }),
   }).pipe(Effect.flatMap(expectOk), Effect.flatMap(HttpClientResponse.schemaBodyJson(Watch)), Effect.scoped)
 
+/**
+ * Watches what a tool call started for `sessionID`, as a harness does on its own, and answers whether it did, and when
+ * Console refused it (`Failed.refused`), what to tell the agent, once per session for its latest reason: the same
+ * refusal again tells it nothing. Anything else that goes wrong, such as Console being unreachable, only skips the
+ * watch.
+ */
+export const watchStarted = Effect.fnUntraced(function* (
+  store: ConsoleStore.Info,
+  sessionID: string,
+  target: string | EventWatch.Target,
+  mode?: EventWatch.Mode,
+) {
+  const made = yield* create(store, sessionID, target, mode).pipe(Effect.exit)
+  if (Exit.isSuccess(made)) return { watched: true }
+  const error = Option.getOrUndefined(Exit.findErrorOption(made))
+  if (!(error instanceof Failed) || error.refused !== true) return { watched: false }
+  const before = yield* update(store, (state, now) => ({
+    ...state,
+    refusals: { ...state.refusals, [sessionID]: { message: error.message, seenAt: now } },
+  }))
+  if (before.refusals?.[sessionID]?.message === error.message) return { watched: false }
+  return {
+    watched: false,
+    notice: `OpenCode Console can't watch this, so changes to it won't wake this session. Tell the user why: ${error.message}`,
+  }
+})
+
 /** The event types the member can watch on the workspace's servers. */
 export const types = (store: ConsoleStore.Info) =>
   call(store, "GET", "/api/event-watches/types").pipe(
@@ -98,13 +131,6 @@ export const list = (store: ConsoleStore.Info) =>
 
 export const cancel = (store: ConsoleStore.Info, id: string) =>
   call(store, "DELETE", `/api/event-watches/${encodeURIComponent(id)}`).pipe(
-    Effect.flatMap(expectOk),
-    Effect.asVoid,
-    Effect.scoped,
-  )
-
-export const cancelSession = (store: ConsoleStore.Info, sessionID: string) =>
-  call(store, "DELETE", `/api/event-watches?${new URLSearchParams({ sessionID })}`).pipe(
     Effect.flatMap(expectOk),
     Effect.asVoid,
     Effect.scoped,
@@ -331,9 +357,10 @@ function call(store: ConsoleStore.Info, method: "GET" | "POST" | "DELETE", path:
       HttpClientRequest.acceptJson,
       HttpClientRequest.setHeaders(ConsoleClient.headers(credential)),
     )
-    return yield* HttpClient.withScope(http).execute(
-      body === undefined ? request : HttpClientRequest.bodyJsonUnsafe(request, body),
-    )
+    // A revoked sign-in or an expired SSO session says so, and how to sign in again, rather than a bare status.
+    return yield* HttpClient.withScope(http)
+      .execute(body === undefined ? request : HttpClientRequest.bodyJsonUnsafe(request, body))
+      .pipe(Effect.tap((response) => ConsoleClient.refusal(credential, response)))
   })
 }
 
@@ -348,7 +375,9 @@ function expectOk(response: HttpClientResponse.HttpClientResponse) {
         response.status === 404
           ? "Event watches are off for this OpenCode Console workspace."
           : (body?.message ?? `OpenCode Console answered ${response.status}`)
-      return Effect.fail(new Failed({ message }))
+      return Effect.fail(
+        new Failed({ message, ...(response.status === 403 && body?._tag === "WatchRefused" ? { refused: true } : {}) }),
+      )
     }),
   )
 }
@@ -523,6 +552,10 @@ const Local = Schema.Struct({
   /** The process waiting to wake each session (`awaitSession`), by the token it claimed the session with. */
   waiters: Schema.optional(
     Schema.Record(Schema.String, Schema.Struct({ token: Schema.String, seenAt: Schema.Number })),
+  ),
+  /** Why Console last refused each session's automatic watch, which its agent was told once (`watchStarted`). */
+  refusals: Schema.optional(
+    Schema.Record(Schema.String, Schema.Struct({ message: Schema.String, seenAt: Schema.Number })),
   ),
 })
 type Local = typeof Local.Type
@@ -805,7 +838,7 @@ const current = Effect.fnUntraced(function* (store: ConsoleStore.Info) {
   const credential = ConsoleCredentials.read(store)
   const owner = credential ? ConsoleCredentials.owner(credential) : ""
   const stored = Option.getOrUndefined(decodeLocal(ConsoleStore.read(ConsoleStore.watchesFile(store)) ?? ""))
-  if (stored?.owner !== owner) return { owner, sessions: {}, hosts: {}, waiters: {} } satisfies Local
+  if (stored?.owner !== owner) return { owner, sessions: {}, hosts: {}, waiters: {}, refusals: {} } satisfies Local
   const live = <T extends { readonly seenAt: number }>(entries: Record<string, T>) =>
     Object.fromEntries(Object.entries(entries).filter(([, entry]) => now - entry.seenAt < LOCAL_SESSION_MS))
   return {
@@ -813,6 +846,7 @@ const current = Effect.fnUntraced(function* (store: ConsoleStore.Info) {
     sessions: live(stored.sessions),
     hosts: live(stored.hosts),
     waiters: live(stored.waiters ?? {}),
+    refusals: live(stored.refusals ?? {}),
   } satisfies Local
 })
 

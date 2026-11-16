@@ -80,6 +80,22 @@ test("installs the channel's current build, keeps the one it replaced, and has t
   ])
 })
 
+test("installs with tar unaffected by a TAR_OPTIONS a project set", async () => {
+  const store = temporaryStore()
+  const live = installRelease(store, { version: "0.1.8" })
+  const served = release({ stable: { version: "0.1.9", ...archive(script("0.1.9")) } })
+  const saved = process.env.TAR_OPTIONS
+  // GNU tar reads TAR_OPTIONS as its own flags: this would leave the binary out of what it extracts.
+  process.env.TAR_OPTIONS = "--exclude=package/bin/opencode-console"
+  try {
+    expect((await update(store, served.service)).outcome).toMatchObject({ status: "installed", to: "0.1.9" })
+  } finally {
+    if (saved === undefined) delete process.env.TAR_OPTIONS
+    else process.env.TAR_OPTIONS = saved
+  }
+  expect(readFileSync(live, "utf8")).toBe(script("0.1.9"))
+})
+
 test("never runs or installs a stable build Anomaly's key didn't sign, and backs the next attempt off", async () => {
   const store = temporaryStore()
   const live = installRelease(store, { version: "0.1.8" })

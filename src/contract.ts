@@ -21,6 +21,12 @@ export const clientID = "opencode-console-cli"
 export const watchesHeader = "x-opencode-event-watches"
 
 /**
+ * The `GET /api/v2/config` response header, `1`, the Console sends while the caller may read workspace instructions
+ * and skills. Without it, both lists would refuse the caller, so the connector doesn't ask.
+ */
+export const instructionsSkillsHeader = "x-opencode-instructions-skills"
+
+/**
  * The request header that names the session an MCP client's calls to the gateway come from, for a client that runs one
  * session per connection. The gateway watches what that session's Slack and GitHub writes start.
  */
@@ -84,7 +90,7 @@ export const Skills = Schema.Struct({
   skills: Schema.Array(Schema.Struct({ slug: Schema.String, version: Schema.String })),
 })
 
-export const Telemetry = Schema.Struct({
+export const Stats = Schema.Struct({
   otlpLogsUrl: Schema.String,
   headers: Schema.Record(Schema.String, Schema.String),
 })
@@ -150,4 +156,5 @@ export const ServerMessage = Schema.Struct({
 })
 // The cursor is opaque: it is sent back exactly as it came.
 export const Poll = Schema.Struct({ cursor: Schema.String, events: Schema.Array(WatchEvent) })
-export const Problem = Schema.Struct({ message: Schema.optional(Schema.String) })
+// `_tag` is `WatchRefused` when the member can't watch the target, which trying again won't change.
+export const Problem = Schema.Struct({ _tag: Schema.optional(Schema.String), message: Schema.optional(Schema.String) })

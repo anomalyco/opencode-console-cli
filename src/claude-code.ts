@@ -131,7 +131,7 @@ const Manifest = Schema.Struct({
   keepProvider: Schema.optional(Schema.Boolean),
   /**
    * Whether Claude Code sends the workspace its usage metadata (`shared`), or would but already sends OpenTelemetry to
-   * the member's own endpoint (`kept`). Absent when the workspace doesn't collect it or Claude Code uses the gateway.
+   * the member's own endpoint (`kept`). Absent when there's no stats target or Claude Code uses the gateway.
    */
   usage: Schema.optional(Schema.Literals(["shared", "kept"])),
 })
@@ -241,7 +241,7 @@ export const refresh = Effect.fn("ClaudeCode.refresh")(function* (
         bundles,
         providers,
         keepProvider,
-        telemetry: snapshot.telemetry,
+        stats: snapshot.stats,
         watches: WorkspaceSnapshot.watches(snapshot),
         shell,
         explicit: setup !== undefined,
@@ -322,7 +322,7 @@ interface Desired {
   readonly bundles: readonly Skill.Bundle[]
   readonly providers: string
   readonly keepProvider: boolean
-  readonly telemetry: WorkspaceSnapshot.Telemetry | undefined
+  readonly stats: WorkspaceSnapshot.Stats | undefined
   readonly watches: boolean
   readonly shell: Readonly<Record<string, string | undefined>>
   /** Setup run by the member, which sets every key again; a background sync leaves keys the member changed. */
@@ -348,7 +348,7 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
   if (first) [desired.paths.settings, desired.paths.global].forEach(SettingsFile.backup)
 
   // Settings: model routing, the auth helper, the model picker, the usage export and the policy hooks.
-  const otel = !desired.models && desired.telemetry ? otelValues(desired, desired.telemetry) : undefined
+  const otel = !desired.models && desired.stats ? otelValues(desired, desired.stats) : undefined
   const usage = otel && (ownOtel(desired, settings, previous, otel) ? ("kept" as const) : ("shared" as const))
   // Running setup is the member's consent to the hooks running, which `disableAllHooks` overrules. Setup owns the key
   // from then on, so a sync doesn't undo that and `--remove` puts it back.
@@ -478,12 +478,12 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
  * keeps its own sign-in sends them, since the gateway already counts every request it serves. Prompt, response, tool
  * and raw API body logging are pinned off.
  */
-function otelValues(desired: Desired, telemetry: WorkspaceSnapshot.Telemetry): Record<string, unknown> {
+function otelValues(desired: Desired, stats: WorkspaceSnapshot.Stats): Record<string, unknown> {
   return {
     "env.CLAUDE_CODE_ENABLE_TELEMETRY": "1",
     "env.OTEL_LOGS_EXPORTER": "otlp",
     "env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/json",
-    "env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": telemetry.otlpLogsUrl,
+    "env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT": stats.otlpLogsUrl,
     // Batched every 30 seconds rather than every 5, so a busy session sends the receiver two requests a minute, each
     // well under its 256 KiB body limit even with subagents running.
     "env.OTEL_LOGS_EXPORT_INTERVAL": "30000",

@@ -10,6 +10,8 @@ import { ConsoleStore } from "./store"
 /** OpenCode re-fetches its workspace config every minute; the CLI treats a snapshot that old as stale. */
 export const MAX_AGE_MS = 60_000
 
+const StatsTarget = Schema.Struct({ otlpLogsUrl: Schema.String, headers: Schema.Record(Schema.String, Schema.String) })
+
 export const Info = Schema.Struct({
   /** `ConsoleCredentials.owner` of the sign-in the config was fetched for. */
   owner: Schema.String,
@@ -24,22 +26,24 @@ export const Info = Schema.Struct({
   /** The skills the member may use (`GET /api/v2/skills`), each at the version its download serves. */
   skills: Schema.optional(Schema.Array(Schema.Struct({ slug: Schema.String, version: Schema.String }))),
   /**
-   * Where a harness that keeps its own sign-in sends the workspace its usage metadata (token counts and model names)
-   * as OpenTelemetry logs, with the headers that authenticate it (`GET /api/v2/telemetry`). Absent while the workspace
-   * collects none from this member.
+   * Where a harness that keeps its own sign-in sends the workspace its usage stats (token counts and model names) as
+   * OpenTelemetry logs, with the headers that authenticate it (`GET /api/v2/stats`). Absent while the Console gives this
+   * credential none.
    */
-  telemetry: Schema.optional(
-    Schema.Struct({ otlpLogsUrl: Schema.String, headers: Schema.Record(Schema.String, Schema.String) }),
-  ),
+  stats: Schema.optional(StatsTarget),
   /** Whether the Console's last config said this member may keep event watches (`ConsoleClient.watchesHeader`). */
   watches: Schema.optional(Schema.Boolean),
   /** Why the sign-in needs the member, such as an expired SSO session, while the last config stays in force. */
   status: Schema.optional(Schema.Struct({ message: Schema.String, url: Schema.optional(Schema.String) })),
 })
 export type Info = typeof Info.Type
-export type Telemetry = NonNullable<Info["telemetry"]>
+export type Stats = NonNullable<Info["stats"]>
 
 const decode = Schema.decodeUnknownOption(Schema.fromJsonString(Info))
+// Connectors 0.1.8 and earlier store and read `stats` as `telemetry`, and share this file with a newer one, such as the
+// copy `setup` installed for a harness's hooks. So it's written under both names and read from either, preferring
+// `stats`. Remove both with `/api/v2/telemetry`.
+const decodeOld = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Struct({ telemetry: StatsTarget })))
 const Providers = Schema.Record(
   Schema.String,
   Schema.Struct({ models: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)) }),
@@ -57,11 +61,20 @@ const McpConfig = Schema.Struct({
 })
 
 export function read(store: ConsoleStore.Info) {
-  return Option.getOrUndefined(decode(ConsoleStore.read(ConsoleStore.snapshotFile(store)) ?? ""))
+  const text = ConsoleStore.read(ConsoleStore.snapshotFile(store)) ?? ""
+  const snapshot = Option.getOrUndefined(decode(text))
+  if (!snapshot || snapshot.stats) return snapshot
+  return Option.match(decodeOld(text), {
+    onNone: () => snapshot,
+    onSome: (old) => ({ ...snapshot, stats: old.telemetry }),
+  })
 }
 
 export function write(store: ConsoleStore.Info, snapshot: Info) {
-  ConsoleStore.write(ConsoleStore.snapshotFile(store), JSON.stringify(snapshot))
+  ConsoleStore.write(
+    ConsoleStore.snapshotFile(store),
+    JSON.stringify(snapshot.stats === undefined ? snapshot : { ...snapshot, telemetry: snapshot.stats }),
+  )
 }
 
 export function clear(store: ConsoleStore.Info) {

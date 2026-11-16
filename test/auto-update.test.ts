@@ -123,19 +123,21 @@ test("backs a failed install off 15 minutes, then an hour, then four", () => {
   expect([at(4 * HOUR - 1), at(4 * HOUR)]).toEqual(["backoff", "started"])
 })
 
-/** The installed 0.1.9, which replaced 0.1.8, kept in `<data>/cli.prev` with its receipt. */
-function updated(store: ReturnType<typeof temporaryStore>, previous: "passes" | "fails" = "passes") {
+/**
+ * The installed 0.1.9, which replaced `version` (0.1.8 by default), kept in `<data>/cli.prev` with its receipt.
+ */
+function updated(store: ReturnType<typeof temporaryStore>, previous: "passes" | "fails" = "passes", version = "0.1.8") {
   const live = installRelease(store, { version: "0.1.9", sha256: "9".repeat(64) })
   const kept = CliInstall.previousDirectory(store)
   mkdirSync(kept, { recursive: true })
-  writeFileSync(path.join(kept, "opencode-console"), script("0.1.8", previous))
+  writeFileSync(path.join(kept, "opencode-console"), script(version, previous))
   chmodSync(path.join(kept, "opencode-console"), 0o755)
   writeFileSync(
     CliInstall.receiptFile(kept),
     JSON.stringify({
       method: "direct",
-      version: "0.1.8",
-      channel: "stable",
+      version,
+      channel: CliInstall.channelOf(version),
       target: "linux-x64",
       sha256: "8".repeat(64),
     }),
@@ -159,6 +161,25 @@ test("rolls back to the last build that worked after three crashed hooks in a ro
   })
   expect(AutoUpdate.read(store).crashes).toBeUndefined()
   expect(started).toEqual([[live, "sync", "--quiet", "--refresh-agents"]])
+})
+
+test("never rolls back to, or self-tests, a build kept from another channel", async () => {
+  const store = temporaryStore()
+  const live = updated(store, "passes", "0.1.9-dev.4")
+  const { started, start } = starts()
+  const selfTests: string[][] = []
+  const selfTest = async (command: readonly string[]) => {
+    selfTests.push([...command])
+    return true
+  }
+
+  const results = await crashes(3, () => AutoUpdate.crashed(store, { running: live, selfTest, start }))
+
+  expect(results).toEqual(["counted", "counted", "no-previous"])
+  expect(selfTests).toEqual([])
+  expect(readFileSync(live, "utf8")).toBe(script("0.1.9"))
+  expect(CliInstall.receipt(store)).toMatchObject({ version: "0.1.9", channel: "stable" })
+  expect(started).toEqual([])
 })
 
 test("reads the channel's manifest again after a rollback, rather than trust the answer that named the bad build", async () => {

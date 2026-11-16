@@ -2,10 +2,10 @@
 # Anomaly's release service, checks its size and SHA-256 and, for a stable or beta release, its Authenticode signature
 # (Anomaly's Artifact Signing certificate),
 # runs its self-test, then hands over to it. Its `setup` installs it where agents run it, connects the agent and keeps
-# it up to date. Served at https://opencode.ai/console/install.ps1; the PowerShell twin of ./install. Ported from
+# it up to date. To be served at https://opencode.ai/console/install.ps1; the PowerShell twin of ./install. Ported from
 # anomalyco/browse's install.ps1 (2b6194cf).
 #
-#   & ([scriptblock]::Create((irm https://opencode.ai/console/install.ps1))) setup claude-code
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install.ps1))) setup claude-code
 #
 # Options: --version <version> (from npm, or $env:OPENCODE_CONSOLE_VERSION), --channel <stable|beta|dev>. Everything
 # else goes to opencode-console.
@@ -144,7 +144,7 @@ function Install-OpenCodeConsole {
 
         if ($rest.Count -eq 0) {
             Write-Host "opencode-console $version checks out. Connect an agent with:"
-            Write-Host "  & ([scriptblock]::Create((irm https://opencode.ai/console/install.ps1))) setup claude-code"
+            Write-Host "  & ([scriptblock]::Create((irm https://raw.githubusercontent.com/anomalyco/opencode-console-cli/production/install.ps1))) setup claude-code"
             return
         }
         if ($releaseSha) { $env:OPENCODE_CONSOLE_RELEASE_SHA256 = $releaseSha }

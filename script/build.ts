@@ -2,7 +2,7 @@
 
 // Builds `dist/npm`, the Node bundle with its own package.json that publishes as `@opencode/console`.
 // `script/compile.ts` builds the release binaries, which `setup` installs from npm where one fits the computer, and
-// `script/pack.ts` packs them. `.github/workflows/publish-console-cli.yml` publishes all of them.
+// `script/pack.ts` packs them. `.github/workflows/release.yml` publishes all of them.
 //
 // The npm bundle also carries the Pi extension, `pi-extension.js`, which `setup pi` lists in Pi's settings and which
 // makes the package a Pi package too (`pi install npm:@opencode/console`), and the DeepSeek Harness plugin,

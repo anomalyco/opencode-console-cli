@@ -226,7 +226,6 @@ export function hooksOff(store: ConsoleStore.Info, input: HooksCheck.Input): Hoo
 
 /** What a sync made of a Hermes profile, for setup to report. */
 export interface Applied {
-  readonly home: string
   readonly models: Provider | undefined
   readonly servers: readonly string[]
   readonly skills: readonly string[]
@@ -476,7 +475,6 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
     JSON.stringify(Manifest.make({ profiles: { ...recorded?.profiles, [desired.paths.home]: profile } })),
   )
   return {
-    home: desired.paths.home,
     models: desired.models,
     servers,
     skills: Object.keys(synced.skills),

@@ -239,12 +239,14 @@ async function watching(
     readonly watches?: boolean
     readonly config?: Record<string, unknown>
     readonly listed?: ReadonlyArray<Record<string, unknown>>
+    /** Answers each new watch, as `serveConsole`'s `create` does. */
+    readonly create?: () => Response
   } = {},
 ) {
   const sockets = inbox<{ send: (frame: string) => void }>()
   const closed = inbox<number>()
   const console = serveConsole(
-    { watches: { watches: options.listed ?? [] } },
+    { watches: { watches: options.listed ?? [], ...(options.create ? { create: options.create } : {}) } },
     { open: (socket) => sockets.push(socket), close: (index) => closed.push(index) },
   )
   cleanup.push(console.stop)
@@ -452,6 +454,27 @@ test("watches the pull request a bash command's `gh pr create` printed, for the 
   await until(() => dsh.console.state.created.length === 1)
 
   expect(dsh.console.state.created).toEqual([{ sessionID: "ses_a", target: "https://github.com/acme/app/pull/7" }])
+})
+
+test("tells the session's agent why Console refused to watch what its bash command started", async () => {
+  const dsh = await watching({
+    create: () =>
+      Response.json(
+        { _tag: "WatchRefused", message: "GitHub isn't available to your account in this workspace." },
+        { status: 403 },
+      ),
+  })
+  await dsh.sync()
+  const a = dsh.resident("ses_a")
+
+  dsh.plugin.watches.result(
+    execution("bash", { command: "gh pr create --fill" }, "ses_a"),
+    shell("https://github.com/acme/app/pull/7\n", ""),
+  )
+
+  expect(text(await a.injected.at(0))).toBe(
+    "OpenCode Console can't watch this, so changes to it won't wake this session. Tell the user why: GitHub isn't available to your account in this workspace.",
+  )
 })
 
 test("watches the branch a bash command's `git push` updated, which git reports on stderr", async () => {

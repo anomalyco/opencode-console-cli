@@ -78,7 +78,8 @@ export const sessionEnded = Effect.fnUntraced(function* (store: ConsoleStore.Inf
 
 /**
  * `PostToolUse`: watches what a Bash command or a call to one of the workspace's gateway servers (`gateway`) just
- * started, for the session that made it.
+ * started, for the session that made it, and answers what to tell Claude when Console refused a watch
+ * (`ConsoleWatches.watchStarted`).
  */
 export const postToolUse = Effect.fnUntraced(function* (
   store: ConsoleStore.Info,
@@ -86,12 +87,14 @@ export const postToolUse = Effect.fnUntraced(function* (
   gateway: ReadonlySet<string>,
 ) {
   const sessionID = event.session_id
-  if (!sessionID || !enabled(store)) return
+  if (!sessionID || !enabled(store)) return undefined
   const created = yield* Effect.forEach(targets(event, gateway), (item) =>
-    ConsoleWatches.create(store, sessionID, item.target, item.mode).pipe(Effect.option),
+    ConsoleWatches.watchStarted(store, sessionID, item.target, item.mode),
   )
   // A session that keeps a watch here gets its updates here.
-  if (created.some(Option.isSome)) yield* ConsoleWatches.touchSession(store, sessionID)
+  if (created.some((item) => item.watched)) yield* ConsoleWatches.touchSession(store, sessionID)
+  const notices = created.flatMap((item) => (item.notice === undefined ? [] : [item.notice]))
+  return notices.length === 0 ? undefined : notices.join("\n\n")
 })
 
 /**

@@ -9,7 +9,7 @@ import { ConsoleStore } from "../../src/store"
 export const server = "https://console.test/console"
 
 /**
- * An OpenCode Console answering the device sign-in, refresh, revoke, account, config, instruction, skill and telemetry
+ * An OpenCode Console answering the device sign-in, refresh, revoke, account, config, instruction, skill and stats
  * endpoints the CLI calls, with the wire shapes `src/contract.ts` reads, which Console's own tests check its real
  * responses against. Like the real Console, a refresh token works once, and reusing one revokes the whole sign-in, and
  * instructions and skills answer only the current access token.
@@ -25,11 +25,16 @@ export function fakeConsole(
     readonly instructions?: () => Response
     /** `GET /api/v2/skills`: the skills the caller may use, each at its version. */
     readonly skills?: () => Response
-    /** `GET /api/v2/telemetry`: where the caller sends usage metadata; 404, collecting none, unless a test says. */
-    readonly telemetry?: () => Response
-    /** Skill bundles by slug (`GET /api/v2/skills/:slug`), and stored files by digest. */
+    /**
+     * Whether the config answer says the caller has instructions and skills (`x-opencode-instructions-skills`), as
+     * Console says for a workspace with extensions on; it does unless a test says otherwise.
+     */
+    readonly instructionsSkills?: () => boolean
+    /** `GET /api/v2/stats`: where the caller sends usage metadata; 404, collecting none, unless a test says. */
+    readonly stats?: () => Response
+    /** Skill bundles by slug (`GET /api/v2/skills/:slug`), and stored files by digest, sent at once or as streamed. */
     readonly bundles?: Record<string, unknown>
-    readonly blobs?: Record<string, Uint8Array>
+    readonly blobs?: Record<string, Uint8Array | ReadableStream<Uint8Array>>
     readonly revoke?: () => Response | undefined
     /** Where device approval links point: the Console's own `/console/device` unless a test says otherwise. */
     readonly verification?: string
@@ -44,6 +49,10 @@ export function fakeConsole(
       readonly watches?: ReadonlyArray<Record<string, unknown>>
       readonly types?: ReadonlyArray<Record<string, unknown>>
       readonly poll?: (cursor: string | null) => Response | Promise<Response>
+      /** Answers every watch route instead, as Console does for a sign-in it ended or an expired SSO session. */
+      readonly refuse?: () => Response
+      /** Answers `POST /api/event-watches` instead of making the watch, as Console does for one it refuses. */
+      readonly create?: () => Response
     }
   } = {},
 ) {
@@ -121,12 +130,10 @@ export function fakeConsole(
     }
     if (route === "/api/v1/models") return input.models?.() ?? Response.json({})
     if (route === "/api/v2/codex/models") return input.codexModels?.() ?? Response.json({ models: [] })
-    const contents =
-      route === "/api/v2/instructions" || route === "/api/v2/telemetry" || route.startsWith("/api/v2/skills")
+    const contents = route === "/api/v2/instructions" || route === "/api/v2/stats" || route.startsWith("/api/v2/skills")
     if (contents && request.headers.get("authorization") !== `Bearer ${state.access}`)
       return Response.json({ _tag: "Unauthorized" }, { status: 401 })
-    if (route === "/api/v2/telemetry")
-      return input.telemetry?.() ?? Response.json({ _tag: "NotFound" }, { status: 404 })
+    if (route === "/api/v2/stats") return input.stats?.() ?? Response.json({ _tag: "NotFound" }, { status: 404 })
     if (route === "/api/v2/instructions") return input.instructions?.() ?? Response.json({ instructions: [] })
     if (route === "/api/v2/skills") return input.skills?.() ?? Response.json({ skills: [] })
     const skill = route.match(/^\/api\/v2\/skills\/([^/]+)(?:\/blobs\/([^/]+))?$/)
@@ -142,12 +149,17 @@ export function fakeConsole(
     if (route === "/api/v2/config") {
       state.configs++
       if (state.revokedFamily) return Response.json({ _tag: "Unauthorized" }, { status: 401 })
-      return state.config()
+      const answer = await state.config()
+      if (!answer.ok || input.instructionsSkills?.() === false) return answer
+      const headers = new Headers(answer.headers)
+      headers.set("x-opencode-instructions-skills", "1")
+      return new Response(answer.body, { status: answer.status, headers })
     }
     return new Response(null, { status: 404 })
   }
   const watches = (request: Request, route: string, body: Record<string, unknown>) => {
     if (!input.watches) return Response.json({ _tag: "NotFound" }, { status: 404 })
+    if (input.watches.refuse) return input.watches.refuse()
     const poll = input.watches.poll
     if (route === "/api/event-watches/events" && poll) {
       const cursor = new URL(request.url).searchParams.get("cursor")
@@ -162,6 +174,7 @@ export function fakeConsole(
     if (route === "/api/event-watches" && request.method === "GET") return Response.json({ watches: state.watches })
     if (route === "/api/event-watches" && request.method === "POST") {
       state.created.push(body)
+      if (input.watches.create) return input.watches.create()
       // Another server's event type is keyed by a hash of it, as Console keys it.
       const watch = {
         id: `ew_${state.created.length}`,

@@ -23,7 +23,7 @@ const watched =
   "a Slack thread or a GitHub pull request, issue, commit or Actions run gets a reply or changes status, or one of the workspace's MCP servers sends an event `events` lists"
 
 const watching =
-  "Slack and GitHub writes through OpenCode Console, `gh pr create` and `git push` are already watched, so don't watch what you just made. Use it for anything else, such as `gh workflow run` or a link the user shared. People often answer a Slack post in the channel rather than its thread, so after each top-level post the channel's new top-level messages are watched for 15 minutes too."
+  "Slack and GitHub writes through OpenCode Console, `gh pr create` and `git push` are watched automatically when Console lets this account watch them, so don't watch what you just made. Use it for anything else, such as `gh workflow run` or a link the user shared. People often answer a Slack post in the channel rather than its thread, so after each top-level post the channel's new top-level messages are watched for 15 minutes too."
 
 /** The tools, as MCP lists them; the Pi extension registers the same ones. */
 export const tools = [

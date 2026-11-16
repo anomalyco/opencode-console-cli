@@ -158,8 +158,8 @@ function split(key: string): [string, string | undefined] {
 }
 
 /**
- * A command line for settings a harness runs through the shell: Claude Code's `apiKeyHelper` and `headersHelper`, and
- * Codex's hook commands and `http_headers_helper`.
+ * A command line for settings a harness runs through the shell (`cmd.exe` on Windows): Claude Code's `apiKeyHelper`
+ * and `headersHelper`, and Codex's `http_headers_helper`. Codex's hooks run in PowerShell there (`Codex.hookLine`).
  */
 export function shellCommand(argv: readonly string[]) {
   return argv

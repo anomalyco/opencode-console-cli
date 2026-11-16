@@ -1,6 +1,6 @@
 export * as ConsoleClient from "./console-client"
 
-import { Clock, Data, Duration, Effect, Option, Schema } from "effect"
+import { Cause, Clock, Data, Duration, Effect, Option, Schema, Stream } from "effect"
 import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 import {
   CodexModels,
@@ -12,13 +12,14 @@ import {
   SkillBundle,
   Skills,
   SsoRequiredBody,
-  Telemetry,
+  Stats,
   Token,
   TokenError,
   UnauthorizedBody,
   User,
   clientID,
   codexModelsPath,
+  instructionsSkillsHeader,
   pluginHeader,
   watchSessionHeader,
   watchesHeader,
@@ -28,6 +29,7 @@ export {
   clientID,
   CodexModels,
   codexModelsPath,
+  instructionsSkillsHeader,
   ModelsDocument,
   pluginHeader,
   SkillBundle,
@@ -164,14 +166,18 @@ export const revoke = Effect.fn("ConsoleClient.revoke")(function* (credential: O
 
 /**
  * The credential's workspace config as the Console sent it (`GET /api/v2/config`), and whether its answer said the
- * caller may keep event watches. Fields are read one at a time where they're used, so one a newer Console changed
- * can't hide the others. Any answer other than a config fails, a 404 included: the Console serves every active
- * workspace a config, so a missing one is never "no policies".
+ * caller may keep event watches and read instructions and skills. Fields are read one at a time where they're used, so
+ * one a newer Console changed can't hide the others. Any answer other than a config fails, a 404 included: the Console
+ * serves every active workspace a config, so a missing one is never "no policies".
  */
 export const fetchConfig = Effect.fn("ConsoleClient.fetchConfig")(function* (credential: Credential) {
   return yield* request(credential, "/api/v2/config", (response) =>
     HttpClientResponse.schemaBodyJson(ConfigDocument)(response).pipe(
-      Effect.map((config) => ({ config, watches: response.headers[watchesHeader] === "1" })),
+      Effect.map((config) => ({
+        config,
+        watches: response.headers[watchesHeader] === "1",
+        instructionsSkills: response.headers[instructionsSkillsHeader] === "1",
+      })),
     ),
   )
 })
@@ -214,11 +220,11 @@ export const fetchSkills = Effect.fn("ConsoleClient.fetchSkills")(function* (cre
 
 /**
  * Where the credential's member sends usage metadata from a harness that keeps its own sign-in, with the headers that
- * authenticate it (`GET /api/v2/telemetry`). A workspace that collects none from this caller answers 404, which is
- * undefined.
+ * authenticate it (`GET /api/v2/stats`). A caller the Console gives none, such as one that isn't a member, gets 404,
+ * which is undefined.
  */
-export const fetchTelemetry = Effect.fn("ConsoleClient.fetchTelemetry")(function* (credential: Credential) {
-  return yield* fetchJson(credential, "/api/v2/telemetry", Telemetry).pipe(
+export const fetchStats = Effect.fn("ConsoleClient.fetchStats")(function* (credential: Credential) {
+  return yield* fetchJson(credential, "/api/v2/stats", Stats).pipe(
     Effect.catchIf(missing, () => Effect.succeed(undefined)),
   )
 })
@@ -228,16 +234,30 @@ export const fetchSkill = Effect.fn("ConsoleClient.fetchSkill")(function* (crede
   return yield* fetchJson(credential, `/api/v2/skills/${encodeURIComponent(slug)}?format=v2`, SkillBundle)
 })
 
-/** A skill's stored file, by its digest. */
+/**
+ * A skill's stored file, by its digest. A file can be 5 MiB and several download at once, so the download fails only
+ * once the Console stops sending it for 10 seconds, rather than when it takes longer than 10 seconds in all.
+ */
 export const fetchSkillBlob = Effect.fn("ConsoleClient.fetchSkillBlob")(function* (
   credential: Credential,
   slug: string,
   sha256: string,
 ) {
-  return yield* request(
+  return yield* respond(
     credential,
     `/api/v2/skills/${encodeURIComponent(slug)}/blobs/${encodeURIComponent(sha256)}`,
-    (ok) => ok.arrayBuffer.pipe(Effect.map((buffer) => new Uint8Array(buffer))),
+  ).pipe(
+    Effect.timeout(STALL),
+    Effect.flatMap((ok) =>
+      ok.stream.pipe(
+        Stream.timeoutOrElse({
+          duration: STALL,
+          orElse: () => Stream.fail(new Cause.TimeoutError("OpenCode Console stopped sending a skill file")),
+        }),
+        Stream.mkUint8Array,
+      ),
+    ),
+    Effect.scoped,
   )
 })
 
@@ -249,13 +269,25 @@ function missing(error: unknown) {
   return error instanceof HttpClientError.HttpClientError && error.response?.status === 404
 }
 
-// A sign-in the Console revoked, or a workspace whose SSO session expired, fails as what it is; anything else that
-// isn't a success is an HTTP error.
+/** How long a Console request may wait for its answer, or a download for its next bytes. */
+const STALL = Duration.seconds(10)
+
+// A JSON answer is small, so the whole request, its body included, gets `STALL`.
 function request<A, E, R>(
   credential: Credential,
   path: string,
   read: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, E, R>,
 ) {
+  return respond(credential, path).pipe(
+    Effect.flatMap(read),
+    // Scoped so a response whose body is never read (errors) is released here.
+    Effect.scoped,
+    Effect.timeout(STALL),
+  )
+}
+
+// A successful answer to `GET path`; anything else that isn't about the sign-in is an HTTP error.
+function respond(credential: Credential, path: string) {
   return Effect.flatMap(HttpClient.HttpClient, (http) =>
     HttpClient.withScope(http)
       .execute(
@@ -265,29 +297,33 @@ function request<A, E, R>(
         ),
       )
       .pipe(
-        Effect.flatMap((response) =>
-          Effect.gen(function* () {
-            if (response.status === 401) {
-              const body = yield* HttpClientResponse.schemaBodyJson(UnauthorizedBody)(response).pipe(Effect.option)
-              if (Option.isSome(body)) return yield* new SignedOut()
-            }
-            if (response.status === 403) {
-              const body = yield* HttpClientResponse.schemaBodyJson(SsoRequiredBody)(response).pipe(Effect.option)
-              if (Option.isSome(body))
-                return yield* new SsoRequired({
-                  organization: credential.type === "oauth" ? credential.orgName : undefined,
-                  url: ssoUrl(credential.server, body.value.connectionId),
-                })
-            }
-            return yield* read(yield* HttpClientResponse.filterStatusOk(response))
-          }),
-        ),
-        // Scoped so a response whose body is never read (errors) is released here.
-        Effect.scoped,
-        Effect.timeout(Duration.seconds(10)),
+        Effect.tap((response) => refusal(credential, response)),
+        Effect.flatMap(HttpClientResponse.filterStatusOk),
       ),
   )
 }
+
+/**
+ * Fails as what it is when the Console refused `response` over the sign-in: a session it revoked or that expired
+ * (`SignedOut`), or a workspace whose SSO session expired (`SsoRequired`). Any other answer passes.
+ */
+export const refusal = Effect.fnUntraced(function* (
+  credential: Credential,
+  response: HttpClientResponse.HttpClientResponse,
+) {
+  if (response.status === 401) {
+    const body = yield* HttpClientResponse.schemaBodyJson(UnauthorizedBody)(response).pipe(Effect.option)
+    if (Option.isSome(body)) return yield* new SignedOut()
+  }
+  if (response.status === 403) {
+    const body = yield* HttpClientResponse.schemaBodyJson(SsoRequiredBody)(response).pipe(Effect.option)
+    if (Option.isSome(body))
+      return yield* new SsoRequired({
+        organization: credential.type === "oauth" ? credential.orgName : undefined,
+        url: ssoUrl(credential.server, body.value.connectionId),
+      })
+  }
+})
 
 /**
  * `input` as a Console base URL: an origin and path without a trailing slash. Tokens and keys go to it, so it must be

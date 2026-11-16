@@ -87,19 +87,19 @@ export function exportRequest(text: string, options: { readonly version?: string
 }
 
 /**
- * Posts one OTLP/HTTP JSON logs export to where the workspace collects usage metadata, when it does. It never fails: a
+ * Posts one OTLP/HTTP JSON logs export to the workspace's stats target, when there is one. It never fails: a
  * report that can't be sent is dropped. It doesn't follow redirects, so the token reaches only the workspace's receiver.
  */
 export async function post(
   body: string,
-  telemetry: WorkspaceSnapshot.Telemetry | undefined,
+  stats: WorkspaceSnapshot.Stats | undefined,
   options: { readonly timeout?: number } = {},
   send: (url: string, init: RequestInit) => Promise<unknown> = fetch,
 ) {
-  if (!telemetry) return
-  await send(telemetry.otlpLogsUrl, {
+  if (!stats) return
+  await send(stats.otlpLogsUrl, {
     method: "POST",
-    headers: { ...telemetry.headers, "content-type": "application/json" },
+    headers: { ...stats.headers, "content-type": "application/json" },
     body,
     redirect: "error",
     signal: AbortSignal.timeout(options.timeout ?? TIMEOUT_MS),
@@ -114,12 +114,12 @@ export async function post(
  */
 export function reportInBackground(
   text: string,
-  telemetry: WorkspaceSnapshot.Telemetry | undefined,
+  stats: WorkspaceSnapshot.Stats | undefined,
   options: { readonly version?: string | undefined; readonly now: number; readonly command: readonly string[] },
   start: (command: readonly string[], body: string) => void = spawnReport,
 ) {
   const body = exportRequest(text, options)
-  if (!telemetry || !body) return
+  if (!stats || !body) return
   start([...options.command, REPORT_COMMAND], JSON.stringify(body))
 }
 
