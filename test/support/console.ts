@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto"
 import { mkdtempSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
 import { FetchHttpClient, type HttpClient } from "effect/http"
 import type { ConsoleClient } from "../../src/console-client"
+import type { ArtifactPublished, ArtifactSummary } from "../../src/contract"
 import { ConsoleStore } from "../../src/store"
 
 export const server = "https://console.test/console"
@@ -54,6 +56,13 @@ export function fakeConsole(
       /** Answers `POST /api/event-watches` instead of making the watch, as Console does for one it refuses. */
       readonly create?: () => Response
     }
+    /**
+     * The artifact routes (Console's `packages/shared/src/api/groups/artifacts.ts`), which answer 404 without it, as
+     * they do for a workspace without artifacts. `owners` are artifacts a teammate shared, by slug, which sharing over
+     * needs `replace` and which this member can't delete; `watching` is what a publish says about watches on the
+     * artifact's comments.
+     */
+    readonly artifacts?: { readonly owners?: Record<string, string>; readonly watching?: boolean }
   } = {},
 ) {
   const verification = input.verification ?? "/console/device"
@@ -81,6 +90,12 @@ export function fakeConsole(
     acked: inbox<ReadonlyArray<string>>(),
     /** The cursor each poll sent, `null` for none. */
     polls: inbox<string | null>(),
+    /** The files the Console holds by digest, each digest uploaded in order, and each prepare and publish body. */
+    blobs: new Map<string, Uint8Array>(),
+    uploads: [] as string[],
+    prepared: [] as Array<Record<string, unknown>>,
+    published: [] as Array<Record<string, unknown>>,
+    shared: new Map<string, { revision: number; title: string; expiresAt: string | null }>(),
   }
   const issue = () => {
     const generation = state.refreshes + 1
@@ -95,6 +110,7 @@ export function fakeConsole(
     })
   }
   const handle = async (request: Request): Promise<Response> => {
+    if (new URL(request.url).pathname.startsWith("/console/api/artifacts")) return artifacts(request)
     const text = await request.text()
     const body: Record<string, unknown> = text ? JSON.parse(text) : {}
     state.requests.push({ url: request.url, headers: request.headers, body, redirect: request.redirect })
@@ -154,6 +170,87 @@ export function fakeConsole(
       const headers = new Headers(answer.headers)
       headers.set("x-opencode-instructions-skills", "1")
       return new Response(answer.body, { status: answer.status, headers })
+    }
+    return new Response(null, { status: 404 })
+  }
+  // The routes answer as Console's `packages/console/src/artifacts.ts` does: `HttpApiError`'s 403 and 404 have no body.
+  const artifacts = async (request: Request) => {
+    const route = new URL(request.url).pathname.replace(/^\/console/, "")
+    if (!input.artifacts) return new Response(null, { status: 404 })
+    const blob = route.match(/^\/api\/artifacts\/blobs\/([0-9a-f]{64})$/)?.[1]
+    if (blob !== undefined && request.method === "PUT") {
+      const bytes = new Uint8Array(await request.arrayBuffer())
+      if (createHash("sha256").update(bytes).digest("hex") !== blob)
+        return Response.json(
+          { _tag: "ArtifactInvalid", message: "The file's bytes don't hash to the SHA-256 it was uploaded under." },
+          { status: 400 },
+        )
+      state.blobs.set(blob, bytes)
+      state.uploads.push(blob)
+      return Response.json({ sha256: blob, bytes: bytes.length })
+    }
+    const text = await request.text()
+    const body: Record<string, unknown> = text ? JSON.parse(text) : {}
+    const files = Array.isArray(body.files) ? body.files.map((file: { sha256: string }) => file.sha256) : []
+    const slug =
+      route === "/api/artifacts/prepare" ? String(body.slug) : route.match(/^\/api\/artifacts\/([a-z0-9-]+)$/)?.[1]
+    const owner = slug === undefined ? undefined : input.artifacts.owners?.[slug]
+    const url = (name: string) => `https://console.test/wrk_test/artifacts/${name}`
+    if (route === "/api/artifacts/prepare") state.prepared.push(body)
+    if (owner && request.method === "DELETE") return new Response(null, { status: 403 })
+    if (owner && body.replace !== true && request.method !== "GET")
+      return Response.json(
+        {
+          _tag: "ArtifactOwned",
+          owner,
+          message: `${owner} shared an artifact with this name. Pick another name, or share again with replace to share over it.`,
+        },
+        { status: 409 },
+      )
+    if (route === "/api/artifacts/prepare")
+      return Response.json({ missing: [...new Set(files)].filter((sha) => !state.blobs.has(sha)) })
+    if (route === "/api/artifacts" && request.method === "GET")
+      return Response.json({
+        artifacts: [...state.shared].map(
+          ([name, item]) =>
+            ({
+              id: `art_${name}`,
+              slug: name,
+              title: item.title,
+              url: url(name),
+              revision: item.revision,
+              sharedBy: "ada@example.com",
+              openThreads: 2,
+              expiresAt: item.expiresAt,
+              updatedAt: "2026-11-13T12:00:00.000Z",
+              canDelete: true,
+            }) satisfies typeof ArtifactSummary.Encoded,
+        ),
+      })
+    if (slug !== undefined && request.method === "PUT") {
+      state.published.push(body)
+      const missing = files.filter((sha) => !state.blobs.has(sha))
+      if (missing.length > 0) return Response.json({ _tag: "ArtifactMissing", missing }, { status: 409 })
+      const revision = (state.shared.get(slug)?.revision ?? 0) + 1
+      const expiresAt =
+        typeof body.ttlSeconds === "number"
+          ? new Date(Date.UTC(2026, 10, 13) + body.ttlSeconds * 1000).toISOString()
+          : null
+      state.shared.set(slug, { revision, title: String(body.title ?? slug), expiresAt })
+      return Response.json({
+        id: `art_${slug}`,
+        slug,
+        title: String(body.title ?? slug),
+        url: url(slug),
+        revision,
+        updated: revision > 1,
+        expiresAt,
+        watching: input.artifacts.watching ?? false,
+      } satisfies typeof ArtifactPublished.Encoded)
+    }
+    if (slug !== undefined && request.method === "DELETE") {
+      if (!state.shared.delete(slug)) return new Response(null, { status: 404 })
+      return new Response(null, { status: 204 })
     }
     return new Response(null, { status: 404 })
   }

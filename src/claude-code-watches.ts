@@ -105,7 +105,10 @@ export const postToolUse = Effect.fnUntraced(function* (
 export function targets(
   event: ClaudeCodeHook.Event,
   gateway: ReadonlySet<string>,
-): ReadonlyArray<{ readonly target: string | EventWatch.Target; readonly mode?: "once" | undefined }> {
+): ReadonlyArray<{
+  readonly target: string | EventWatch.Target | ConsoleWatches.Subscription
+  readonly mode?: "once" | undefined
+}> {
   const tool = event.tool_name ?? ""
   if (tool === "Bash") {
     const command = event.tool_input?.command

@@ -304,6 +304,28 @@ function respond(credential: Credential, path: string) {
 }
 
 /**
+ * `method path` on the credential's Console as its member, with a JSON body or raw bytes. A sign-in the Console refused
+ * fails as what it is (`refusal`); any other answer is the caller's to read, within the caller's scope.
+ */
+export function send(credential: Credential, method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) {
+  return Effect.flatMap(HttpClient.HttpClient, (http) => {
+    const request = HttpClientRequest.make(method)(`${credential.server}${path}`).pipe(
+      HttpClientRequest.acceptJson,
+      HttpClientRequest.setHeaders(headers(credential)),
+    )
+    return HttpClient.withScope(http)
+      .execute(
+        body === undefined
+          ? request
+          : body instanceof Uint8Array
+            ? HttpClientRequest.bodyUint8Array(request, body, "application/octet-stream")
+            : HttpClientRequest.bodyJsonUnsafe(request, body),
+      )
+      .pipe(Effect.tap((response) => refusal(credential, response)))
+  })
+}
+
+/**
  * Fails as what it is when the Console refused `response` over the sign-in: a session it revoked or that expired
  * (`SignedOut`), or a workspace whose SSO session expired (`SsoRequired`). Any other answer passes.
  */

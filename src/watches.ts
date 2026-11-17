@@ -2,7 +2,7 @@ export * as ConsoleWatches from "./watches"
 
 import { createHash, randomUUID } from "node:crypto"
 import { Clock, Data, Deferred, Duration, Effect, Exit, Layer, Option, Schema, Semaphore } from "effect"
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { HttpClient, HttpClientResponse } from "effect/http"
 import { Socket } from "effect/socket"
 import { version } from "../package.json" with { type: "json" }
 import { ConsoleClient } from "./console-client"
@@ -93,7 +93,7 @@ export const create = (
 export const watchStarted = Effect.fnUntraced(function* (
   store: ConsoleStore.Info,
   sessionID: string,
-  target: string | EventWatch.Target,
+  target: string | EventWatch.Target | Subscription,
   mode?: EventWatch.Mode,
 ) {
   const made = yield* create(store, sessionID, target, mode).pipe(Effect.exit)
@@ -352,15 +352,8 @@ function call(store: ConsoleStore.Info, method: "GET" | "POST" | "DELETE", path:
   return Effect.gen(function* () {
     const credential = yield* ConsoleCredentials.fresh(store)
     if (!credential) return yield* new Failed({ message: ConsoleClient.signedOutMessage })
-    const http = yield* HttpClient.HttpClient
-    const request = HttpClientRequest.make(method)(`${credential.server}${path}`).pipe(
-      HttpClientRequest.acceptJson,
-      HttpClientRequest.setHeaders(ConsoleClient.headers(credential)),
-    )
     // A revoked sign-in or an expired SSO session says so, and how to sign in again, rather than a bare status.
-    return yield* HttpClient.withScope(http)
-      .execute(body === undefined ? request : HttpClientRequest.bodyJsonUnsafe(request, body))
-      .pipe(Effect.tap((response) => ConsoleClient.refusal(credential, response)))
+    return yield* ConsoleClient.send(credential, method, path, body)
   })
 }
 
@@ -383,14 +376,30 @@ function expectOk(response: HttpClientResponse.HttpClientResponse) {
 }
 
 /**
- * What a finished shell command started that's worth watching: the pull request `gh pr create` printed, or the branch
- * `git push` updated on GitHub, whose Actions runs settle the watch. Anything less clear-cut is skipped.
+ * What a finished shell command started that's worth watching: the pull request `gh pr create` printed, the branch
+ * `git push` updated on GitHub, whose Actions runs settle the watch, or the comments on the artifact
+ * `opencode-console artifact share` shared. Anything less clear-cut is skipped.
  */
 export function shellTarget(
   command: string,
   shell: { readonly exit?: number | undefined; readonly output: string },
-): string | EventWatch.Target | undefined {
+): string | EventWatch.Target | Subscription | undefined {
   if (shell.exit !== 0) return undefined
+  if (/(?:^|[\s;&|(/])(?:opencode-console|@opencode\/console(?:@\S+)?)\s+artifact\s+share\b/.test(command)) {
+    // The share's first line (`Shared <slug>: <url>`, or `Updated <slug> …`), or its `--json` output.
+    const slugs = new Set(
+      Array.from(
+        shell.output.matchAll(
+          /^(?:Shared|Updated) ([a-z0-9]+(?:-[a-z0-9]+)*)[: ]|"slug":"([a-z0-9]+(?:-[a-z0-9]+)*)"/gm,
+        ),
+        (match) => match[1] ?? match[2],
+      ),
+    )
+    const slug = slugs.size === 1 ? [...slugs][0] : undefined
+    return slug === undefined
+      ? undefined
+      : { server: "artifacts", event: "artifact.comment", arguments: { artifact: slug } }
+  }
   if (/(?:^|[\s;&|(])gh\s+pr\s+create\b/.test(command)) {
     const urls = new Set(
       Array.from(shell.output.matchAll(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/g), (match) => match[0]),
@@ -490,8 +499,8 @@ const actions = new Map<string, (target: string) => string>([
  * The member's own words read as theirs, so a reply from their phone steers the agent. Anyone else's, and anything a
  * bot wrote, are information for the task, never a source of new actions. So is a new message in a channel the session
  * posted in, the member's own included: it may be meant for anyone. A status change is only its target, status and
- * link. An MCP server's own event is its title, its link and its data, always as information. Only the body is free
- * text, fenced once.
+ * link. An MCP server's own event is its title, its link and its data, as information unless Console says the member
+ * made it (a server an admin trusts to say who an event is from). Only the body is free text, fenced once.
  */
 function describe(event: WatchEvent) {
   const url = line(event.url)
@@ -499,7 +508,10 @@ function describe(event: WatchEvent) {
   const action = actions.get(event.kind)
   const ownWords = own(event)
   const body = event.body.trim() ? [fence(event.body)] : []
-  if (event.kind === "event") return [`${title(event)}${url ? ` (${url})` : ""}. ${notFromUser}`, ...body].join("\n")
+  if (event.kind === "event")
+    return [`${title(event)}${url ? ` (${url})` : ""}${ownWords ? ", from you:" : `. ${notFromUser}`}`, ...body].join(
+      "\n",
+    )
   if (event.kind === "channel_post")
     return [
       `${line(event.actor.login)}${event.actor.bot ? " (a bot)" : ""} posted in ${title(event)} (${url}) after your post (may be unrelated). ${notForYou}`,
