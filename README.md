@@ -110,6 +110,21 @@ offers them over MCP Events and you can use it in the workspace. The `events` to
 `watch` takes a server, an event and that event's arguments. Console checks your access to the server again for every
 event. The agent is told each event comes from the server, and not to act on requests in it that you haven't made.
 
+## Share a folder as an artifact
+
+```sh
+npx @opencode/console artifact share ./out --ttl 7d
+```
+
+When the workspace has artifacts on, `artifact share` uploads a folder with an `index.html` and prints its link, which
+the workspace's members can open and comment on. The folder's name names the artifact unless you pass `--name`.
+Dotfiles are skipped, and a share holds up to 500 files and 100 MB, with no file over 25 MB. Sharing the same name
+again updates the artifact at the same link and uploads only the files that changed. `--replace` shares over a
+teammate's artifact of the same name, and `--ttl` (`12h`, `7d`, `2w`) makes it expire after that long. `artifact list`
+lists the workspace's artifacts, and `artifact delete <name>` deletes one you shared. A Claude Code, Codex, Pi or
+DeepSeek Harness session that runs `artifact share` watches the artifact's comments, which reach it as other watched
+updates do.
+
 ## Updates
 
 The binary that setup installs updates itself. It checks its release channel in the background when an agent session

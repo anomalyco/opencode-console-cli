@@ -28,6 +28,9 @@ const parsed = parseArgs({
     "next-prompt": { type: "boolean" },
     "refresh-agents": { type: "boolean" },
     check: { type: "boolean" },
+    name: { type: "string" },
+    ttl: { type: "string" },
+    replace: { type: "boolean" },
   },
 })
 const command = parsed.positionals[0]
@@ -43,6 +46,7 @@ const HOOKS = ["claude-code", "codex", "hermes"]
 const VENDOR_SIGN_IN = ["claude-code", "codex", "hermes"]
 
 const commands: Record<string, () => Promise<number>> = {
+  artifact,
   check,
   hook,
   login,
@@ -995,6 +999,73 @@ function instructionsAndSkills(instructions: number, skills: readonly string[]) 
   ]
 }
 
+/**
+ * Shares a local folder as one of the workspace's artifacts, lists them, or deletes one. A harness that runs
+ * `artifact share` in its shell watches the shared artifact's comments for the session (`ConsoleWatches.shellTarget`),
+ * which reads the first line printed here or the `--json` output's `slug`.
+ */
+async function artifact() {
+  const [, action, target, ...rest] = parsed.positionals
+  const valid =
+    rest.length === 0 &&
+    (action === "list" ? target === undefined : (action === "share" || action === "delete") && target !== undefined)
+  if (!valid) {
+    process.stderr.write(
+      "Usage: opencode-console artifact share <folder> [--name <name>] [--ttl 7d] [--replace] | list | delete <name>\n",
+    )
+    return 1
+  }
+  const { Artifact } = await import("./artifact")
+  const { ConsoleStore } = await import("./store")
+  const store = ConsoleStore.make()
+  const print = (value: unknown, text: string) =>
+    process.stdout.write(flags.json === true ? `${JSON.stringify(value)}\n` : `${text}\n`)
+  const expires = (at: string | null) => (at ? `expires ${new Date(at).toLocaleString()}` : undefined)
+  if (action === "list") {
+    const artifacts = await withConsole(Artifact.list(store))
+    print(
+      { artifacts },
+      artifacts.length === 0
+        ? "No artifacts in the workspace yet"
+        : artifacts
+            .map((item) =>
+              [
+                `${item.slug}  ${item.url}`,
+                item.title,
+                `shared by ${item.sharedBy}`,
+                item.openThreads ? count(item.openThreads, "open thread", "open threads") : undefined,
+                expires(item.expiresAt),
+              ]
+                .filter(Boolean)
+                .join(" · "),
+            )
+            .join("\n"),
+    )
+    return 0
+  }
+  if (action === "delete") {
+    const deleted = await withConsole(Artifact.remove(store, target!))
+    print(deleted, `Deleted ${deleted.deleted}`)
+    return 0
+  }
+  const shared = await withConsole(
+    Artifact.share(store, target!, { name: flag("name"), ttl: flag("ttl"), replace: flags.replace === true }),
+  )
+  print(
+    shared,
+    [
+      shared.updated
+        ? `Updated ${shared.slug} (revision ${shared.revision}): ${shared.url}`
+        : `Shared ${shared.slug}: ${shared.url}`,
+      expires(shared.expiresAt),
+      shared.watching ? "A session is watching its comments" : undefined,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  )
+  return 0
+}
+
 /** Prints the headers a workspace MCP server needs, for Claude Code's `headersHelper`. */
 async function mcpHeaders() {
   const name = parsed.positionals[1]
@@ -1506,6 +1577,13 @@ Connect coding agents to an OpenCode Console workspace: its models, MCP servers,
 Usage: opencode-console <command> [options]
 
 Commands:
+  artifact share <folder> [--name <name>] [--ttl 7d] [--replace]
+                          Share a folder with an index.html as one of the workspace's artifacts and
+                          print its link. --ttl takes hours, days or weeks (12h, 7d, 2w); --replace
+                          shares over a teammate's artifact of the same name; --json prints JSON
+  artifact list [--json]  List the workspace's artifacts
+  artifact delete <name> [--json]
+                          Delete an artifact you shared (owners and admins can delete any)
   setup <claude-code|pi|codex|deepseek-harness|hermes>
                           Sign in if needed and set up Claude Code, Pi, Codex, DeepSeek Harness or
                           Hermes Agent to use the workspace (--remove undoes it). With
