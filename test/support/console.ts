@@ -96,6 +96,10 @@ export function fakeConsole(
     prepared: [] as Array<Record<string, unknown>>,
     published: [] as Array<Record<string, unknown>>,
     shared: new Map<string, { revision: number; title: string; expiresAt: string | null }>(),
+    /** Each artifact's published manifests, revision 1 first, which a test may change before a pull reads them. */
+    revisions: new Map<string, Array<ReadonlyArray<{ path: string; sha256: string }>>>(),
+    /** Each blob `GET /api/artifacts/:slug/blobs/:sha256` fetched, as `<sha256>?revision=<n>`. */
+    downloads: [] as string[],
   }
   const issue = () => {
     const generation = state.refreshes + 1
@@ -189,6 +193,36 @@ export function fakeConsole(
       state.uploads.push(blob)
       return Response.json({ sha256: blob, bytes: bytes.length })
     }
+    const read = route.match(/^\/api\/artifacts\/([a-z0-9-]+)\/(files|blobs\/([0-9a-f]{64}))$/)
+    if (read && request.method === "GET") {
+      const revisions = state.revisions.get(read[1]!) ?? []
+      const asked = new URL(request.url).searchParams.get("revision")
+      const revision = asked === null ? revisions.length : Number(asked)
+      const files = revisions[revision - 1]
+      if (!files) return new Response(null, { status: 404 })
+      const sha = read[3]
+      if (sha !== undefined) {
+        const bytes = state.blobs.get(sha)
+        if (!files.some((file) => file.sha256 === sha) || !bytes) return new Response(null, { status: 404 })
+        state.downloads.push(`${sha}?revision=${asked}`)
+        return new Response(bytes, { headers: { "content-type": "application/octet-stream" } })
+      }
+      // Small HTML and CSS come inline, as Console lists small UTF-8 text.
+      return Response.json({
+        revision,
+        title: read[1],
+        files: files.map((file) => {
+          const bytes = state.blobs.get(file.sha256) ?? new Uint8Array()
+          const text = /\.(html|css)$/.test(file.path) ? new TextDecoder().decode(bytes) : undefined
+          return {
+            ...file,
+            bytes: bytes.length,
+            mediaType: "application/octet-stream",
+            ...(text === undefined ? {} : { text }),
+          }
+        }),
+      })
+    }
     const text = await request.text()
     const body: Record<string, unknown> = text ? JSON.parse(text) : {}
     const files = Array.isArray(body.files) ? body.files.map((file: { sha256: string }) => file.sha256) : []
@@ -237,6 +271,12 @@ export function fakeConsole(
           ? new Date(Date.UTC(2026, 10, 13) + body.ttlSeconds * 1000).toISOString()
           : null
       state.shared.set(slug, { revision, title: String(body.title ?? slug), expiresAt })
+      state.revisions.set(slug, [
+        ...(state.revisions.get(slug) ?? []),
+        Array.isArray(body.files)
+          ? body.files.map((file: { path: string; sha256: string }) => ({ path: file.path, sha256: file.sha256 }))
+          : [],
+      ])
       return Response.json({
         id: `art_${slug}`,
         slug,

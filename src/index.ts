@@ -31,6 +31,8 @@ const parsed = parseArgs({
     name: { type: "string" },
     ttl: { type: "string" },
     replace: { type: "boolean" },
+    revision: { type: "string" },
+    force: { type: "boolean" },
   },
 })
 const command = parsed.positionals[0]
@@ -1000,18 +1002,25 @@ function instructionsAndSkills(instructions: number, skills: readonly string[]) 
 }
 
 /**
- * Shares a local folder as one of the workspace's artifacts, lists them, or deletes one. A harness that runs
- * `artifact share` in its shell watches the shared artifact's comments for the session (`ConsoleWatches.shellTarget`),
- * which reads the first line printed here or the `--json` output's `slug`.
+ * Shares a local folder as one of the workspace's artifacts, pulls one's files, lists them, or deletes one. A harness
+ * that runs `artifact share` in its shell watches the shared artifact's comments for the session
+ * (`ConsoleWatches.shellTarget`), which reads the first line printed here or the `--json` output's `slug`.
  */
 async function artifact() {
   const [, action, target, ...rest] = parsed.positionals
   const valid =
-    rest.length === 0 &&
-    (action === "list" ? target === undefined : (action === "share" || action === "delete") && target !== undefined)
+    action === "pull"
+      ? target !== undefined && rest.length <= 1
+      : rest.length === 0 &&
+        (action === "list" ? target === undefined : (action === "share" || action === "delete") && target !== undefined)
   if (!valid) {
     process.stderr.write(
-      "Usage: opencode-console artifact share <folder> [--name <name>] [--ttl 7d] [--replace] | list | delete <name>\n",
+      [
+        "Usage: opencode-console artifact share <folder> [--name <name>] [--ttl 7d] [--replace]",
+        "       opencode-console artifact pull <name> [dir] [--revision <n>] [--force]",
+        "       opencode-console artifact list | delete <name>",
+        "",
+      ].join("\n"),
     )
     return 1
   }
@@ -1040,6 +1049,19 @@ async function artifact() {
                 .join(" · "),
             )
             .join("\n"),
+    )
+    return 0
+  }
+  if (action === "pull") {
+    const pulled = await withConsole(
+      Artifact.pull(store, target!, { dir: rest[0], revision: flag("revision"), force: flags.force === true }),
+    )
+    print(
+      pulled,
+      [
+        `Pulled ${pulled.slug} (revision ${pulled.revision}) into ${pulled.dir}`,
+        ...pulled.files.map((file) => `  ${file}`),
+      ].join("\n"),
     )
     return 0
   }
@@ -1580,7 +1602,11 @@ Commands:
   artifact share <folder> [--name <name>] [--ttl 7d] [--replace]
                           Share a folder with an index.html as one of the workspace's artifacts and
                           print its link. --ttl takes hours, days or weeks (12h, 7d, 2w); --replace
-                          shares over a teammate's artifact of the same name; --json prints JSON
+                          shares over a teammate's artifact of the same name; --json prints JSON.
+                          In a git checkout, it notes the remote, branch and commit
+  artifact pull <name> [dir] [--revision <n>] [--force]
+                          Write an artifact's files into dir (./<name> by default), which must be
+                          new or empty unless --force. --revision picks an earlier revision
   artifact list [--json]  List the workspace's artifacts
   artifact delete <name> [--json]
                           Delete an artifact you shared (owners and admins can delete any)
