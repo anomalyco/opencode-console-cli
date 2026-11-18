@@ -123,7 +123,16 @@ again updates the artifact at the same link and uploads only the files that chan
 teammate's artifact of the same name, and `--ttl` (`12h`, `7d`, `2w`) makes it expire after that long. `artifact list`
 lists the workspace's artifacts, and `artifact delete <name>` deletes one you shared. A Claude Code, Codex, Pi or
 DeepSeek Harness session that runs `artifact share` watches the artifact's comments, which reach it as other watched
-updates do.
+updates do. When the folder is in a git checkout, the share notes its `origin` remote (without any credentials in it),
+branch and commit, which Console keeps with the revision.
+
+```sh
+npx @opencode/console artifact pull launch-plan --revision 3
+```
+
+`artifact pull <name> [dir]` writes an artifact's latest files, or `--revision`'s, into `dir` (`./<name>` by default).
+The folder must be new or empty unless you pass `--force`. Every file is checked against its SHA-256 before anything is
+written.
 
 ## Updates
 

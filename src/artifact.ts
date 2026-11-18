@@ -1,7 +1,8 @@
 export * as Artifact from "./artifact"
 
+import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import { Data, Effect, Option } from "effect"
 import { HttpClientResponse } from "effect/http"
@@ -13,9 +14,10 @@ import type { ConsoleStore } from "./store"
 // Publishes a local folder to the workspace's artifacts in three steps, as OpenCode's Console plugin does:
 // `POST /api/artifacts/prepare` answers which files the Console doesn't have yet, each of those goes up as
 // `PUT /api/artifacts/blobs/:sha256`, and `PUT /api/artifacts/:slug` publishes the manifest. A re-share uploads only
-// the files that changed. The wire shapes are in `contract.ts`.
+// the files that changed. A pull reads a revision's manifest and fetches the files it doesn't carry inline. The wire
+// shapes are in `contract.ts`.
 
-const UPLOADS = 4
+const TRANSFERS = 4
 // Console's limits and slug rules (`packages/schema/src/artifact.ts`), checked here so a share it would refuse stops
 // before any upload.
 const MAX_SLUG = 54
@@ -79,6 +81,43 @@ function ttlSeconds(ttl: string) {
 }
 
 /**
+ * Where the folder's git checkout says the share came from: its `origin` remote without anything that could be a
+ * secret, its branch and its commit. Nothing outside git.
+ */
+function source(folder: string) {
+  const git = (...args: string[]) => {
+    const result = spawnSync("git", ["-C", folder, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })
+    return result.status === 0 ? result.stdout.trim() || undefined : undefined
+  }
+  const remote = git("config", "--get", "remote.origin.url")
+  const repo = remote === undefined ? undefined : remoteOf(remote)
+  const branch = git("symbolic-ref", "--quiet", "--short", "HEAD")
+  const commitSha = git("rev-parse", "--verify", "--quiet", "HEAD")
+  const claims = { ...(repo ? { repo } : {}), ...(branch ? { branch } : {}), ...(commitSha ? { commitSha } : {}) }
+  return Object.keys(claims).length === 0 ? undefined : claims
+}
+
+const REMOTE_PROTOCOLS = new Set(["https:", "http:", "ssh:", "git:", "git+ssh:", "git+https:"])
+
+/**
+ * A git remote as Console keeps one (`remoteOf` in its `packages/schema/src/artifact.ts`), so no credential leaves the
+ * machine: a remote helper's `<helper>::` dropped, a URL's user, password, query and fragment cleared, an scp-style
+ * remote's user dropped. Anything else, such as a local path, is undefined.
+ */
+export function remoteOf(repo: string) {
+  const remote = repo.replace(/^[A-Za-z][A-Za-z0-9+.-]*::/, "")
+  const url = URL.parse(remote)
+  if (url !== null && url.host !== "" && REMOTE_PROTOCOLS.has(url.protocol)) {
+    url.username = ""
+    url.password = ""
+    url.search = ""
+    url.hash = ""
+    return url.toString()
+  }
+  return /^(?:[^/]+@)?([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+:[^\s?#]+)$/.exec(remote)?.[1]
+}
+
+/**
  * Shares `folder` as the workspace artifact `name` (the folder's name by default), uploading only the files the Console
  * doesn't have yet. Sharing over someone else's artifact of the same name needs `replace`.
  */
@@ -90,6 +129,7 @@ export const share = Effect.fnUntraced(function* (
   const collected = yield* attempt(() => ({
     ...collect(folder, options.name),
     ttl: options.ttl === undefined ? undefined : ttlSeconds(options.ttl),
+    source: source(folder),
   }))
   const credential = yield* signedIn(store)
   const replace = options.replace ? { replace: true } : {}
@@ -113,7 +153,7 @@ export const share = Effect.fnUntraced(function* (
     uploads,
     (file) =>
       call(credential, "PUT", `/api/artifacts/blobs/${file.sha256}`, file.bytes, collected.slug).pipe(Effect.scoped),
-    { concurrency: UPLOADS, discard: true },
+    { concurrency: TRANSFERS, discard: true },
   )
   const published = yield* call(
     credential,
@@ -123,6 +163,7 @@ export const share = Effect.fnUntraced(function* (
       ...(collected.title ? { title: collected.title } : {}),
       files: collected.files.map((file) => ({ path: file.path, sha256: file.sha256 })),
       ...(collected.ttl === undefined ? {} : { ttlSeconds: collected.ttl }),
+      ...(collected.source ? { source: collected.source } : {}),
       ...replace,
     } satisfies typeof Contract.ArtifactPublish.Type,
     collected.slug,
@@ -142,9 +183,110 @@ export const list = Effect.fnUntraced(function* (store: ConsoleStore.Info) {
 /** Deletes the artifact `name`, which its creator and the workspace's owners and admins may do. */
 export const remove = Effect.fnUntraced(function* (store: ConsoleStore.Info, name: string) {
   const slug = yield* attempt(() => slugify(name))
-  yield* call(yield* signedIn(store), "DELETE", `/api/artifacts/${slug}`, undefined, slug).pipe(Effect.scoped)
+  yield* call(
+    yield* signedIn(store),
+    "DELETE",
+    `/api/artifacts/${slug}`,
+    undefined,
+    slug,
+    `No artifact named ${slug}`,
+  ).pipe(Effect.scoped)
   return { deleted: slug }
 })
+
+/**
+ * Writes revision `revision` of the artifact `name` (its latest by default) into `dir`, `./<name>` by default, which
+ * must be new or empty unless `force`. Every file's bytes must match the manifest's digest before any is written, and
+ * a path that would leave `dir` or pass through a symlink stops the pull.
+ */
+export const pull = Effect.fnUntraced(function* (
+  store: ConsoleStore.Info,
+  name: string,
+  options: {
+    readonly dir?: string | undefined
+    readonly revision?: string | undefined
+    readonly force?: boolean
+  } = {},
+) {
+  const slug = yield* attempt(() => slugify(name))
+  const root = path.resolve(options.dir ?? slug)
+  const revision = options.revision
+  yield* attempt(() => {
+    if (revision !== undefined && !/^[1-9]\d*$/.test(revision))
+      throw new Failed({ message: "--revision takes a revision number, like 3" })
+    if (!options.force) empty(root)
+  })
+  const credential = yield* signedIn(store)
+  const missing = revision === undefined ? `No artifact named ${slug}` : `${slug} has no revision ${revision}`
+  const listed = yield* call(
+    credential,
+    "GET",
+    `/api/artifacts/${slug}/files${revision === undefined ? "" : `?revision=${revision}`}`,
+    undefined,
+    slug,
+    missing,
+  ).pipe(Effect.flatMap(HttpClientResponse.schemaBodyJson(Contract.ArtifactFiles)), Effect.scoped)
+  const unsafe = listed.files.find((file) => !isSafePath(file.path))
+  if (unsafe) return yield* new Failed({ message: `Refusing to write ${JSON.stringify(unsafe.path)}, outside ${root}` })
+  const files = yield* Effect.forEach(
+    listed.files,
+    Effect.fnUntraced(function* (file) {
+      // Inline text is the file's bytes when it encodes back to the same digest; otherwise fetch the bytes themselves.
+      const inline = file.text === undefined ? undefined : new TextEncoder().encode(file.text)
+      if (inline && sha256(inline) === file.sha256) return { path: file.path, bytes: inline }
+      const bytes = yield* call(
+        credential,
+        "GET",
+        `/api/artifacts/${slug}/blobs/${file.sha256}?revision=${listed.revision}`,
+        undefined,
+        slug,
+        missing,
+      ).pipe(
+        Effect.flatMap((response) => response.arrayBuffer),
+        Effect.map((buffer) => new Uint8Array(buffer)),
+        Effect.scoped,
+      )
+      if (sha256(bytes) !== file.sha256)
+        return yield* new Failed({ message: `${file.path} doesn't match its SHA-256; nothing was written` })
+      return { path: file.path, bytes }
+    }),
+    { concurrency: TRANSFERS },
+  )
+  yield* attempt(() => files.forEach((file) => write(root, file.path, file.bytes)))
+  return { slug, revision: listed.revision, dir: root, files: files.map((file) => file.path) }
+})
+
+const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex")
+
+// Relative, with no `.` or `..` segment, backslash or control character, so it can only name a file under the folder.
+function isSafePath(file: string) {
+  return (
+    !/[\p{Cc}\\]/u.test(file) &&
+    !path.posix.isAbsolute(file) &&
+    !path.win32.isAbsolute(file) &&
+    file.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
+  )
+}
+
+function empty(root: string) {
+  const stat = statSync(root, { throwIfNoEntry: false })
+  if (stat === undefined) return
+  if (!stat.isDirectory()) throw new Failed({ message: `${root} isn't a folder` })
+  if (readdirSync(root).length > 0) throw new Failed({ message: `${root} isn't empty; pass --force to write into it` })
+}
+
+// Writes one file under `root`, creating its folders, and stops at a symlink anywhere on the way rather than follow it.
+function write(root: string, file: string, bytes: Uint8Array) {
+  mkdirSync(root, { recursive: true })
+  const target = file.split("/").reduce((parent, segment, index, segments) => {
+    const next = path.join(parent, segment)
+    const stat = lstatSync(next, { throwIfNoEntry: false })
+    if (stat?.isSymbolicLink()) throw new Failed({ message: `Refusing to write ${file} through the symlink ${next}` })
+    if (index < segments.length - 1 && stat === undefined) mkdirSync(next)
+    return next
+  }, root)
+  writeFileSync(target, bytes)
+}
 
 // A folder that can't be read, or input the Console would refuse anyway, stops the command before any request.
 function attempt<A>(body: () => A) {
@@ -162,21 +304,29 @@ const signedIn = Effect.fnUntraced(function* (store: ConsoleStore.Info) {
   return credential
 })
 
-// The response when the Console took the request, otherwise what it said. `slug` names the artifact a 404 or 409 is
-// about.
+// The response when the Console took the request, otherwise what it said. `slug` names the artifact a 403 or 409 is
+// about, and `notFound` is what a 404 means; without it, a 404 means the workspace has artifacts off.
 function call(
   credential: ConsoleClient.Credential,
   method: "GET" | "POST" | "PUT" | "DELETE",
   path: string,
   body?: unknown,
   slug?: string,
+  notFound?: string,
 ) {
   return ConsoleClient.send(credential, method, path, body).pipe(
-    Effect.flatMap((response) => (response.status < 300 ? Effect.succeed(response) : refused(response, method, slug))),
+    Effect.flatMap((response) =>
+      response.status < 300 ? Effect.succeed(response) : refused(response, method, slug, notFound),
+    ),
   )
 }
 
-function refused(response: HttpClientResponse.HttpClientResponse, method: string, slug: string | undefined) {
+function refused(
+  response: HttpClientResponse.HttpClientResponse,
+  method: string,
+  slug: string | undefined,
+  notFound: string | undefined,
+) {
   return HttpClientResponse.schemaBodyJson(Contract.ArtifactProblem)(response).pipe(
     Effect.option,
     Effect.flatMap((problem) => {
@@ -191,9 +341,7 @@ function refused(response: HttpClientResponse.HttpClientResponse, method: string
                 ? `Only the person who shared ${slug}, or a workspace owner or admin, can delete it`
                 : response.status !== 404
                   ? `OpenCode Console answered ${response.status}`
-                  : method === "DELETE"
-                    ? `No artifact named ${slug}`
-                    : "Artifacts are off for this OpenCode Console workspace"))
+                  : (notFound ?? "Artifacts are off for this OpenCode Console workspace")))
       return Effect.fail(new Failed({ message }))
     }),
   )

@@ -1,10 +1,20 @@
 import { afterEach, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { Artifact } from "../src/artifact"
 import { serveConsole } from "./support/console"
 
-// `artifact share | list | delete` run as their own process, as a harness's shell runs them, against a Console served
+// `artifact share | pull | list | delete` run as their own process, as a harness's shell runs them, against a Console served
 // over real HTTP whose artifact routes stand in for the Console API's.
 const cleanup: Array<() => unknown> = []
 afterEach(() => cleanup.splice(0).forEach((item) => item()))
@@ -22,7 +32,7 @@ function directory() {
 }
 
 /** A folder named `demo` with the files given, by path. */
-function folder(files: Record<string, string>) {
+function folder(files: Record<string, string | Uint8Array>) {
   const root = path.join(directory(), "demo")
   Object.entries(files).forEach(([file, content]) => {
     mkdirSync(path.dirname(path.join(root, file)), { recursive: true })
@@ -31,9 +41,10 @@ function folder(files: Record<string, string>) {
   return root
 }
 
-async function cli(server: string, args: string[]) {
+async function cli(server: string, args: string[], cwd?: string) {
   const root = directory()
   const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "../src/index.ts"), ...args], {
+    cwd: cwd ?? root,
     env: {
       ...process.env,
       OPENCODE_API_KEY: "key-1",
@@ -54,7 +65,7 @@ async function cli(server: string, args: string[]) {
   return { stdout, stderr, code }
 }
 
-const digest = (text: string) => new Bun.CryptoHasher("sha256").update(text).digest("hex")
+const digest = (text: string | Uint8Array) => new Bun.CryptoHasher("sha256").update(text).digest("hex")
 
 test("shares a folder's files without its dotfiles, and prints the link", async () => {
   const console = serve()
@@ -213,4 +224,135 @@ test("says when the workspace doesn't have artifacts", async () => {
   const listed = await cli(console.url, ["artifact", "list"])
 
   expect([listed.code, listed.stderr]).toEqual([1, "Artifacts are off for this OpenCode Console workspace\n"])
+})
+
+test("notes the folder's git remote without its credentials, its branch and its commit", async () => {
+  const console = serve()
+  const dir = folder({ "index.html": "<p>hi</p>" })
+  const git = (...args: string[]) =>
+    Bun.spawnSync(["git", "-c", "user.name=Ada", "-c", "user.email=ada@example.com", ...args], { cwd: dir })
+      .stdout.toString()
+      .trim()
+  git("init", "--quiet", "--initial-branch=launch")
+  git("remote", "add", "origin", "https://ada:ghp_secret@github.com/acme/app.git?token=1#top")
+  git("commit", "--quiet", "--allow-empty", "--message", "first")
+
+  await cli(console.url, ["artifact", "share", dir])
+
+  expect(console.state.published.map((body) => body.source)).toEqual([
+    { repo: "https://github.com/acme/app.git", branch: "launch", commitSha: git("rev-parse", "HEAD") },
+  ])
+})
+
+test("keeps a scp-style remote without its user, and no local path at all", () => {
+  expect(Artifact.remoteOf("git@github.com:acme/app.git")).toBe("github.com:acme/app.git")
+  expect(Artifact.remoteOf("ada:token@github.com:acme/app.git")).toBe("github.com:acme/app.git")
+  expect(Artifact.remoteOf("ssh://ada:token@github.com/acme/app.git")).toBe("ssh://github.com/acme/app.git")
+  expect(Artifact.remoteOf("/srv/git/app.git")).toBeUndefined()
+})
+
+// The bytes a PNG might hold: not UTF-8, so the listing never carries them inline.
+const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00, 0xfe])
+
+test("pulls the latest revision into ./<name>, fetching only the files the listing doesn't carry inline", async () => {
+  const console = serve()
+  await cli(console.url, ["artifact", "share", folder({ "index.html": "<p>hi</p>", "assets/logo.png": png })])
+  const cwd = directory()
+
+  const pulled = await cli(console.url, ["artifact", "pull", "demo"], cwd)
+
+  const dir = path.join(cwd, "demo")
+  expect([pulled.code, pulled.stdout.replace(/into .*\n/, "into <dir>\n")]).toEqual([
+    0,
+    "Pulled demo (revision 1) into <dir>\n  assets/logo.png\n  index.html\n",
+  ])
+  expect([readFileSync(path.join(dir, "index.html"), "utf8"), readFileSync(path.join(dir, "assets/logo.png"))]).toEqual(
+    ["<p>hi</p>", Buffer.from(png)],
+  )
+  expect(console.state.downloads).toEqual([`${digest(png)}?revision=1`])
+})
+
+test("--revision pulls an earlier revision, and says when the artifact doesn't keep it", async () => {
+  const console = serve()
+  const dir = folder({ "index.html": "<p>one</p>" })
+  await cli(console.url, ["artifact", "share", dir])
+  writeFileSync(path.join(dir, "index.html"), "<p>two</p>")
+  await cli(console.url, ["artifact", "share", dir])
+  const target = path.join(directory(), "old")
+
+  const pulled = await cli(console.url, ["artifact", "pull", "demo", target, "--revision", "1", "--json"])
+  const gone = await cli(console.url, ["artifact", "pull", "demo", path.join(directory(), "x"), "--revision", "9"])
+
+  expect(JSON.parse(pulled.stdout)).toEqual({ slug: "demo", revision: 1, dir: target, files: ["index.html"] })
+  expect(readFileSync(path.join(target, "index.html"), "utf8")).toBe("<p>one</p>")
+  expect([gone.code, gone.stderr]).toEqual([1, "demo has no revision 9\n"])
+})
+
+test("writes only into a new or empty folder unless --force, keeping the folder's other files", async () => {
+  const console = serve()
+  await cli(console.url, ["artifact", "share", folder({ "index.html": "<p>hi</p>" })])
+  const target = folder({ "notes.txt": "mine" })
+
+  const refused = await cli(console.url, ["artifact", "pull", "demo", target])
+  const forced = await cli(console.url, ["artifact", "pull", "demo", target, "--force"])
+
+  expect([refused.code, refused.stderr]).toEqual([1, `${target} isn't empty; pass --force to write into it\n`])
+  expect([forced.code, readdirSync(target).sort()]).toEqual([0, ["index.html", "notes.txt"]])
+})
+
+test("refuses a listed path that could land outside the folder, writing nothing", async () => {
+  const console = serve()
+  await cli(console.url, ["artifact", "share", folder({ "index.html": "<p>hi</p>" })])
+  const parent = directory()
+
+  const runs = []
+  for (const unsafe of ["../escape.html", "/tmp/escape.html", "a\\escape.html", "a/./escape.html"]) {
+    console.state.revisions.set("demo", [[{ path: unsafe, sha256: digest("<p>hi</p>") }]])
+    runs.push(await cli(console.url, ["artifact", "pull", "demo", path.join(parent, "out")]))
+  }
+
+  expect(runs.map((run) => run.code)).toEqual([1, 1, 1, 1])
+  expect(runs.map((run) => run.stderr).every((stderr) => stderr.startsWith("Refusing to write"))).toBe(true)
+  expect(readdirSync(parent)).toEqual([])
+})
+
+test("never writes through a symlink in the folder", async () => {
+  const console = serve()
+  await cli(console.url, ["artifact", "share", folder({ "index.html": "<p>hi</p>", "assets/app.css": "body {}" })])
+  const outside = folder({ "keep.html": "outside" })
+  const linked = directory()
+  symlinkSync(outside, path.join(linked, "assets"))
+  const page = directory()
+  symlinkSync(path.join(outside, "keep.html"), path.join(page, "index.html"))
+
+  const throughFolder = await cli(console.url, ["artifact", "pull", "demo", linked, "--force"])
+  const throughFile = await cli(console.url, ["artifact", "pull", "demo", page, "--force"])
+
+  expect([throughFolder.code, throughFolder.stderr]).toEqual([
+    1,
+    `Refusing to write assets/app.css through the symlink ${path.join(linked, "assets")}\n`,
+  ])
+  expect([throughFile.code, throughFile.stderr]).toEqual([
+    1,
+    `Refusing to write index.html through the symlink ${path.join(page, "index.html")}\n`,
+  ])
+  expect([readdirSync(outside), readFileSync(path.join(outside, "keep.html"), "utf8")]).toEqual([
+    ["keep.html"],
+    "outside",
+  ])
+})
+
+test("refuses a file whose bytes don't match the listing's SHA-256, writing nothing", async () => {
+  const console = serve()
+  await cli(console.url, ["artifact", "share", folder({ "index.html": "<p>hi</p>", "logo.png": png })])
+  console.state.blobs.set(digest(png), new Uint8Array([1, 2, 3]))
+  const target = path.join(directory(), "out")
+
+  const pulled = await cli(console.url, ["artifact", "pull", "demo", target])
+
+  expect([pulled.code, pulled.stderr, existsSync(target)]).toEqual([
+    1,
+    "logo.png doesn't match its SHA-256; nothing was written\n",
+    false,
+  ])
 })
