@@ -145,7 +145,7 @@ test("--ttl sends how long the artifact lasts, in seconds", async () => {
   expect(console.state.published.map((body) => body.ttlSeconds)).toEqual([1_209_600])
 })
 
-test("refuses a --ttl over a year, or a folder without an index.html, before asking the Console anything", async () => {
+test("refuses a --ttl over a year, or a folder without an index.html or index.md, before asking the Console anything", async () => {
   const console = serve()
 
   const pages = folder({ "page.html": "<p>hi</p>" })
@@ -154,7 +154,7 @@ test("refuses a --ttl over a year, or a folder without an index.html, before ask
   const index = await cli(console.url, ["artifact", "share", pages])
 
   expect([ttl.code, ttl.stderr]).toEqual([1, "--ttl takes 1h to 365d in hours, days or weeks, like 7d\n"])
-  expect([index.code, index.stderr]).toEqual([1, `${pages} has no index.html\n`])
+  expect([index.code, index.stderr]).toEqual([1, `${pages} has no index.html or index.md\n`])
   expect(console.state.prepared).toEqual([])
 })
 
@@ -270,6 +270,21 @@ test("pulls the latest revision into ./<name>, fetching only the files the listi
     ["<p>hi</p>", Buffer.from(png)],
   )
   expect(console.state.downloads).toEqual([`${digest(png)}?revision=1`])
+})
+
+test("shares a Markdown folder titled by its first heading, and pulls its PNG back byte for byte", async () => {
+  const console = serve()
+  await cli(console.url, [
+    "artifact",
+    "share",
+    folder({ "index.md": "Draft\n\n# Launch *plan*\n\n![Chart](img/chart.png)", "img/chart.png": png }),
+  ])
+  const cwd = directory()
+
+  await cli(console.url, ["artifact", "pull", "demo"], cwd)
+
+  expect(console.state.published.map((body) => body.title)).toEqual(["Launch plan"])
+  expect(readFileSync(path.join(cwd, "demo/img/chart.png"))).toEqual(Buffer.from(png))
 })
 
 test("--revision pulls an earlier revision, and says when the artifact doesn't keep it", async () => {

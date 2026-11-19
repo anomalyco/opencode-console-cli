@@ -30,10 +30,11 @@ const MAX_TTL_SECONDS = 365 * 86_400
 /** What stopped a command, in words for the person or agent that ran it. */
 export class Failed extends Data.TaggedError("Artifact.Failed")<{ readonly message: string }> {}
 
-/** The folder's files to share: it needs an index.html, dotfiles are skipped, and Console's limits hold. */
+/** The folder's files to share: it needs an index.html or an index.md, dotfiles are skipped, and Console's limits hold. */
 export function collect(folder: string, name?: string) {
   const root = path.resolve(folder)
-  if (!existsSync(path.join(root, "index.html"))) throw new Failed({ message: `${root} has no index.html` })
+  const page = ["index.html", "index.md"].find((file) => existsSync(path.join(root, file)))
+  if (!page) throw new Failed({ message: `${root} has no index.html or index.md` })
   const paths = readdirSync(root, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isFile())
     .map((entry) => path.relative(root, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
@@ -51,8 +52,13 @@ export function collect(folder: string, name?: string) {
     const bytes = readFileSync(path.join(root, file))
     return { path: file, bytes, sha256: createHash("sha256").update(bytes).digest("hex") }
   })
-  const title = readFileSync(path.join(root, "index.html"), "utf8")
-    .match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]
+  const text = readFileSync(path.join(root, page), "utf8")
+  // An HTML page's `<title>`; a Markdown page's first `# heading`, its emphasis and code marks dropped.
+  const title = (
+    page === "index.html"
+      ? text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]
+      : text.match(/^# +(.+?)[ #]*$/m)?.[1]?.replace(/[*_`]/g, "")
+  )
     ?.slice(0, 200)
     .trim()
   return { slug: slugify(name ?? path.basename(root)), title: title || undefined, files }
