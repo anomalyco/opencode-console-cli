@@ -373,7 +373,7 @@ function watching(ctx: Pick<Context, "get">, state: InProcess.Session) {
    * Watches `target` for the session whose tool call started it; it runs beside the call, which never waits on it. A
    * refusal tells the session's agent why (`ConsoleWatches.watchStarted`).
    */
-  const watch = (sessionID: string, target: string | EventWatch.Target, mode?: "once") =>
+  const watch = (sessionID: string, target: string | EventWatch.Target | ConsoleWatches.Subscription, mode?: "once") =>
     void state
       .run(ConsoleWatches.watchStarted(state.store, sessionID, target, mode))
       .then((created) => {

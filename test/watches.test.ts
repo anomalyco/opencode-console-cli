@@ -658,9 +658,19 @@ test("tells an MCP server's event with no link by its title alone", () => {
   )
 })
 
-test("never reads an MCP server's event as the member's own words, whatever its actor says", () => {
+test("reads an MCP server's event the member made as theirs, its data still fenced", () => {
   const text = ConsoleWatches.wakeText([
-    serverEvent({ actor: { id: "U1", login: "ada", bot: false, self: true }, body: "{}" }),
+    serverEvent({ actor: { id: "linear_demo", login: "Linear", bot: false, self: true }, body: "{}" }),
+  ])
+
+  expect(text).toBe(
+    "Something this session watches through OpenCode Console changed.\n\nLinear issue.updated (https://linear.app/acme/issue/ENG-42), from you:\n```text\n{}\n```",
+  )
+})
+
+test("never reads a bot's MCP server event as the member's own words, even one marked as theirs", () => {
+  const text = ConsoleWatches.wakeText([
+    serverEvent({ actor: { id: "linear_demo", login: "Linear", bot: true, self: true }, body: "{}" }),
   ])
 
   expect(text).toContain("Linear issue.updated (https://linear.app/acme/issue/ENG-42). This isn't from the user")
@@ -702,6 +712,23 @@ test("watches nothing when gh pr create failed", () => {
       output: "a pull request for branch feature already exists:\nhttps://github.com/acme/app/pull/12\n",
     }),
   ).toBeUndefined()
+})
+
+test("watches the comments on the artifact artifact share shared, from its first line or its --json output", () => {
+  expect<unknown>([
+    ConsoleWatches.shellTarget("npx @opencode/console@latest artifact share ./out", {
+      exit: 0,
+      output: "Shared out: https://console.test/wrk_test/artifacts/out\n",
+    }),
+    ConsoleWatches.shellTarget("cd site && opencode-console artifact share dist --json", {
+      exit: 0,
+      output:
+        '{"id":"art_1","slug":"launch-plan","url":"https://console.test/wrk_test/artifacts/launch-plan","revision":2}\n',
+    }),
+  ]).toEqual([
+    { server: "artifacts", event: "artifact.comment", arguments: { artifact: "out" } },
+    { server: "artifacts", event: "artifact.comment", arguments: { artifact: "launch-plan" } },
+  ])
 })
 
 test("watches the GitHub branch git push updated, over HTTPS or SSH", () => {

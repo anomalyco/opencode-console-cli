@@ -537,6 +537,30 @@ test("Claude Code's PostToolUse hook watches the branch a Bash git push updated,
   ])
 })
 
+test("Claude Code's PostToolUse hook watches the comments on the artifact a Bash artifact share shared", async () => {
+  const { root } = home()
+  const { console } = watchingConsole(root)
+  const share = claudeHook("PostToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: "npx @opencode/console artifact share ./out --name launch-plan" },
+    tool_response: { stdout: "Shared launch-plan: https://console.test/wrk_test/artifacts/launch-plan\n", stderr: "" },
+  })
+
+  const hook = await cli(root, ["hook", "claude-code"], { stdin: share })
+
+  expect([hook.code, console.state.created]).toEqual([
+    0,
+    [
+      {
+        sessionID: "ses_claude",
+        server: "artifacts",
+        event: "artifact.comment",
+        arguments: { artifact: "launch-plan" },
+      },
+    ],
+  ])
+})
+
 test("Claude Code's PostToolUse hook tells Claude why Console refused to watch the branch a git push updated", async () => {
   const { root } = home()
   watchingConsole(root, {

@@ -158,3 +158,76 @@ export const ServerMessage = Schema.Struct({
 export const Poll = Schema.Struct({ cursor: Schema.String, events: Schema.Array(WatchEvent) })
 // `_tag` is `WatchRefused` when the member can't watch the target, which trying again won't change.
 export const Problem = Schema.Struct({ _tag: Schema.optional(Schema.String), message: Schema.optional(Schema.String) })
+
+// ---- Artifacts ----
+// A share is `POST /api/artifacts/prepare`, a `PUT /api/artifacts/blobs/:sha256` of each file's raw bytes the Console
+// says it's missing, then `PUT /api/artifacts/:slug` (Console's `packages/schema/src/artifact.ts`).
+
+export const ArtifactPrepare = Schema.Struct({
+  slug: Schema.String,
+  files: Schema.Array(Schema.Struct({ path: Schema.String, sha256: Schema.String, bytes: Schema.Number })),
+  replace: Schema.optional(Schema.Boolean),
+})
+/** The digests the workspace doesn't store yet. */
+export const ArtifactPrepared = Schema.Struct({ missing: Schema.Array(Schema.String) })
+/** Where a share says it came from, which Console keeps unchecked with the revision. */
+export const ArtifactSource = Schema.Struct({
+  repo: Schema.optional(Schema.String),
+  branch: Schema.optional(Schema.String),
+  commitSha: Schema.optional(Schema.String),
+  sessionID: Schema.optional(Schema.String),
+})
+export const ArtifactPublish = Schema.Struct({
+  title: Schema.optional(Schema.String),
+  files: Schema.Array(Schema.Struct({ path: Schema.String, sha256: Schema.String })),
+  ttlSeconds: Schema.optional(Schema.Number),
+  replace: Schema.optional(Schema.Boolean),
+  source: Schema.optional(ArtifactSource),
+})
+/** A published share; `url` is its page in Console, and `watching` whether a session now watches its comments. */
+export const ArtifactPublished = Schema.Struct({
+  id: Schema.String,
+  slug: Schema.String,
+  title: Schema.String,
+  url: Schema.String,
+  revision: Schema.Number,
+  updated: Schema.Boolean,
+  expiresAt: Schema.NullOr(Schema.String),
+  watching: Schema.Boolean,
+})
+export const ArtifactSummary = Schema.Struct({
+  id: Schema.String,
+  slug: Schema.String,
+  title: Schema.String,
+  url: Schema.String,
+  revision: Schema.Number,
+  sharedBy: Schema.String,
+  openThreads: Schema.Number,
+  expiresAt: Schema.NullOr(Schema.String),
+  updatedAt: Schema.String,
+  canDelete: Schema.Boolean,
+})
+export const ArtifactList = Schema.Struct({ artifacts: Schema.Array(ArtifactSummary) })
+/**
+ * A revision's files, `GET /api/artifacts/:slug/files[?revision=N]`, the latest without one. `text` is a small UTF-8
+ * file's content; any other file's bytes are `GET /api/artifacts/:slug/blobs/:sha256?revision=N`.
+ */
+export const ArtifactFiles = Schema.Struct({
+  revision: Schema.Number,
+  title: Schema.String,
+  files: Schema.Array(
+    Schema.Struct({
+      path: Schema.String,
+      sha256: Schema.String,
+      bytes: Schema.Number,
+      text: Schema.optional(Schema.String),
+    }),
+  ),
+})
+// `_tag` is `ArtifactOwned` (with the teammate who shared the name), `ArtifactMissing` or `ArtifactInvalid`; Console's
+// 403 and 404 have no body.
+export const ArtifactProblem = Schema.Struct({
+  _tag: Schema.optional(Schema.String),
+  message: Schema.optional(Schema.String),
+  owner: Schema.optional(Schema.String),
+})
