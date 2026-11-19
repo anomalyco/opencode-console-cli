@@ -116,7 +116,7 @@ event. The agent is told each event comes from the server, and not to act on req
 npx @opencode/console artifact share ./out --ttl 7d
 ```
 
-When the workspace has artifacts on, `artifact share` uploads a folder with an `index.html` and prints its link, which
+When the workspace has artifacts on, `artifact share` uploads a folder with an `index.md` or an `index.html` and prints its link, which
 the workspace's members can open and comment on. The folder's name names the artifact unless you pass `--name`.
 Dotfiles are skipped, and a share holds up to 500 files and 100 MB, with no file over 25 MB. Sharing the same name
 again updates the artifact at the same link and uploads only the files that changed. `--replace` shares over a

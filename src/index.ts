@@ -1600,10 +1600,10 @@ Usage: opencode-console <command> [options]
 
 Commands:
   artifact share <folder> [--name <name>] [--ttl 7d] [--replace]
-                          Share a folder with an index.html as one of the workspace's artifacts and
-                          print its link. --ttl takes hours, days or weeks (12h, 7d, 2w); --replace
-                          shares over a teammate's artifact of the same name; --json prints JSON.
-                          In a git checkout, it notes the remote, branch and commit
+                          Share a folder with an index.md or index.html as one of the workspace's
+                          artifacts and print its link. --ttl takes hours, days or weeks (12h, 7d,
+                          2w); --replace shares over a teammate's artifact of the same name; --json
+                          prints JSON. In a git checkout, it notes the remote, branch and commit
   artifact pull <name> [dir] [--revision <n>] [--force]
                           Write an artifact's files into dir (./<name> by default), which must be
                           new or empty unless --force. --revision picks an earlier revision
