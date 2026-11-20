@@ -53,6 +53,20 @@ hook() {
     console.log(code, Math.round(performance.now() - started))
   ' "$1"
 }
+# The OpenClaw plugin setup wrote, and a tool call through it as OpenClaw's before_tool_call makes one: prints the
+# hook's answer as JSON, null when it lets the call through.
+openclaw_plugin() { ls "$DATA"/openclaw/*/plugin/index.cjs; }
+openclaw_call() {
+  node -e '
+    const hooks = {}
+    require(process.argv[1]).register({
+      runtime: { version: "2026.11.5", agent: { resolveAgentWorkspaceDir: () => "/tmp" } },
+      config: {}, registerProvider() {}, on: (name, handler) => (hooks[name] = handler),
+    })
+    hooks.before_tool_call({ toolName: "exec", params: { command: process.argv[2] } }, { agentId: "main" })
+      .then((answer) => console.log(JSON.stringify(answer ?? null)))
+  ' "$(openclaw_plugin)" "$1"
+}
 receipt() { bun -e 'console.log(JSON.parse(await Bun.file(process.argv[1]).text())[process.argv[2]] ?? "")' "$DATA/cli/install.json" "$1" 2>/dev/null; }
 until_true() { for _ in $(seq 1 "$2"); do eval "$1" && return 0; sleep 1; done; return 1; }
 
@@ -86,6 +100,10 @@ check "Node copy blocks rm -rf ./probe (exit $code, ${ms} ms)" '[ "$code" = 2 ]'
 node "$ROOT/npm/index.js" setup hermes > "$ROOT/setup-hermes.log" 2>&1; status=$?
 check "setup hermes from the Node copy exited 0" '[ $status -eq 0 ]'
 check "Hermes's plugin runs the Node copy" 'grep -q "$DATA/cli/index.js" "$HOME/.hermes/plugins/opencode-console/__init__.py"'
+node "$ROOT/npm/index.js" setup openclaw > "$ROOT/setup-openclaw.log" 2>&1; status=$?
+check "setup openclaw from the Node copy exited 0" '[ $status -eq 0 ]'
+check "OpenClaw's plugin runs the Node copy" 'grep -q "$DATA/cli/index.js" "$(openclaw_plugin)"'
+check "openclaw.json loads the plugin and holds no token" 'grep -q "opencode-console" "$HOME/.openclaw/openclaw.json" && ! grep -q "access-\|ocgw_" "$HOME/.openclaw/openclaw.json"'
 
 section "Migration: setup pi from npm hands over to the $V1 binary, which moves Claude Code onto it"
 publish $V1
@@ -100,6 +118,7 @@ check "pi-extension.js parses under Node" 'node --check "$DATA/cli/pi-extension.
 check "dsh-plugin.js loads under Node and exports apply" '[ "$(node -e "import(process.argv[1]).then((m) => console.log(typeof m.apply))" "$DATA/cli/dsh-plugin.js")" = function ]'
 check "Claude Code's hook now runs the binary" 'settings | grep -q "\"command\": \"$DATA/cli/opencode-console\"" || settings | grep -q "\"command\":\"$DATA/cli/opencode-console\""'
 check "Claude Code's header names $V1" 'settings | grep -q "opencode-console/$V1"'
+check "OpenClaw's plugin now runs the binary" 'grep -q "\"$DATA/cli/opencode-console\"" "$(openclaw_plugin)" && ! grep -q "index.js" "$(openclaw_plugin)"'
 check "Hermes's plugin now runs the binary" 'grep -q "\"$DATA/cli/opencode-console\"" "$HOME/.hermes/plugins/opencode-console/__init__.py" && ! grep -q "index.js" "$HOME/.hermes/plugins/opencode-console/__init__.py"'
 echo '{"action":"shell","resources":["rm -rf ./probe"],"shell":"bash"}' | node "$DATA/cli/index.js" check > "$ROOT/shim.log"; status=$?
 check "a session still running the Node copy's entry gets the binary's decision (exit $status)" '[ $status -eq 2 ] && grep -q deny "$ROOT/shim.log"'
@@ -111,6 +130,8 @@ read -r code ms <<< "$(hook 'ls')"
 check "allows ls (exit $code, ${ms} ms)" '[ "$code" = 0 ]'
 read -r code ms <<< "$(HOOK_PATH=/var/empty hook 'ls')"
 check "allows ls with nothing on PATH, so no Node (exit $code, ${ms} ms)" '[ "$code" = 0 ]'
+check "OpenClaw's plugin blocks exec rm -rf ./probe through the binary" 'openclaw_call "rm -rf ./probe" | grep -q "\"block\":true"'
+check "OpenClaw's plugin lets exec ls through" '[ "$(openclaw_call ls)" = null ]'
 times=""
 for _ in 1 2 3 4 5 6 7 8 9; do read -r code ms <<< "$(hook 'ls')"; times="$times$ms "; done
 echo "    hook times (ms): $times"
@@ -154,6 +175,10 @@ check "ls is allowed again (exit $code, ${ms} ms)" '[ "$code" = 0 ]'
 "$DATA/cli/opencode-console" update --check > "$ROOT/update5.log" 2>&1
 sed 's/^/    /' "$ROOT/update5.log"
 check "a check reports the rolled-back build rather than offer it" 'grep -q "rolled back" "$ROOT/update5.log"'
+
+section "setup openclaw --remove"
+"$DATA/cli/opencode-console" setup openclaw --remove > "$ROOT/remove-openclaw.log" 2>&1; status=$?
+check "setup openclaw --remove exited 0 and took out the openclaw.json it created" '[ $status -eq 0 ] && [ ! -e "$HOME/.openclaw/openclaw.json" ]'
 
 section "Result: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

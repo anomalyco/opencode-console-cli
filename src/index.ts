@@ -42,10 +42,10 @@ let harness = flag("harness") ?? process.env.OPENCODE_CONSOLE_HARNESS
 let hooksOff = false
 const NOT_SIGNED_IN = "Not signed in. Run `npx @opencode/console login` or set OPENCODE_API_KEY."
 // The agents `setup` connects, and the ones whose hooks run `hook`; Pi and DeepSeek Harness check in their own process.
-const AGENTS = ["claude-code", "pi", "codex", "deepseek-harness", "hermes"]
-const HOOKS = ["claude-code", "codex", "hermes"]
+const AGENTS = ["claude-code", "pi", "codex", "deepseek-harness", "hermes", "openclaw"]
+const HOOKS = ["claude-code", "codex", "hermes", "openclaw"]
 // The agents that can keep their own sign-in and models with `--keep-provider`.
-const VENDOR_SIGN_IN = ["claude-code", "codex", "hermes"]
+const VENDOR_SIGN_IN = ["claude-code", "codex", "hermes", "openclaw"]
 
 const commands: Record<string, () => Promise<number>> = {
   artifact,
@@ -53,7 +53,7 @@ const commands: Record<string, () => Promise<number>> = {
   hook,
   login,
   logout,
-  // Started by setup's Hermes plugin, never by a person, so `--help` leaves it out.
+  // Started by setup's Hermes and OpenClaw plugins, never by a person, so `--help` leaves it out.
   "mcp-env": mcpEnv,
   "mcp-headers": mcpHeaders,
   "mcp-watches": mcpWatches,
@@ -153,6 +153,7 @@ async function hook() {
     return 2
   }
   if (target === "hermes") return hermesHook(await stdin())
+  if (target === "openclaw") return openclawHook(await stdin())
   const { Option } = await import("effect")
   const { ClaudeCodeHook } = await import("./claude-code-hook")
   const text = await stdin()
@@ -212,6 +213,38 @@ async function hermesHook(text: string) {
   process.stdout.write(
     `${JSON.stringify(event.hook_event_name === "pre_llm_call" ? { mcp: Hermes.mcpEnvironment(WorkspaceSnapshot.read(store)).version } : {})}\n`,
   )
+  return 0
+}
+
+/**
+ * Answers setup's OpenClaw plugin (`OpenClawHook`): checks a tool call from `before_tool_call` and prints
+ * `{"action":"block","message":...}` with exit code 2 for a denial, which the plugin returns to OpenClaw as
+ * `blockReason`. Anything it can't read is blocked.
+ */
+async function openclawHook(text: string) {
+  const { Option } = await import("effect")
+  const { OpenClaw } = await import("./openclaw")
+  const { OpenClawHook } = await import("./openclaw-hook")
+  const { WorkspaceSnapshot } = await import("./snapshot")
+  const { ConsoleStore } = await import("./store")
+  const event = Option.getOrUndefined(OpenClawHook.decode(text))
+  if (!event) return refuse("opencode-console couldn't read this hook's input, so it was blocked")
+  const store = ConsoleStore.make()
+  const paths = OpenClaw.paths()
+  const directory = event.cwd || process.cwd()
+  const checks = OpenClawHook.checks(event, {
+    directory,
+    servers: Object.keys(WorkspaceSnapshot.servers(WorkspaceSnapshot.read(store))),
+    // The workspace's skills, the agent workspace's own and the install's.
+    skills: [
+      OpenClaw.skillsDirectory(store, paths.config),
+      path.join(directory, "skills"),
+      path.join(paths.state, "skills"),
+    ],
+  })
+  const denied = (await decide(checks)).find((decision) => decision.effect === "deny")
+  if (denied?.effect === "deny") return refuse(denied.message)
+  process.stdout.write("{}\n")
   return 0
 }
 
@@ -543,18 +576,29 @@ async function setup() {
   }
   const keepProvider = flags["keep-provider"] === true
   if (keepProvider && !VENDOR_SIGN_IN.includes(target)) {
-    process.stderr.write("--keep-provider works with claude-code, codex and hermes\n")
+    process.stderr.write("--keep-provider works with claude-code, codex, hermes and openclaw\n")
     return 1
   }
   const pi = target === "pi"
   const codex = target === "codex"
   const dsh = target === "deepseek-harness"
   const hermes = target === "hermes"
-  if (flag("profile") !== undefined && !hermes) {
-    process.stderr.write("--profile works with hermes\n")
+  const openclaw = target === "openclaw"
+  if (flag("profile") !== undefined && !hermes && !openclaw) {
+    process.stderr.write("--profile works with hermes and openclaw\n")
     return 1
   }
-  const name = pi ? "Pi" : codex ? "Codex" : dsh ? "DeepSeek Harness" : hermes ? "Hermes Agent" : "Claude Code"
+  const name = pi
+    ? "Pi"
+    : codex
+      ? "Codex"
+      : dsh
+        ? "DeepSeek Harness"
+        : hermes
+          ? "Hermes Agent"
+          : openclaw
+            ? "OpenClaw"
+            : "Claude Code"
   const { ConsoleStore } = await import("./store")
   const { ConsoleCredentials } = await import("./credentials")
   const { CliInstall } = await import("./install")
@@ -567,6 +611,7 @@ async function setup() {
     const { Pi } = await import("./pi")
     const { DeepSeekHarness } = await import("./deepseek-harness")
     const { Hermes } = await import("./hermes")
+    const { OpenClaw } = await import("./openclaw")
     const removed = await Effect.runPromise(
       ConsoleStore.locked(
         store,
@@ -579,7 +624,9 @@ async function setup() {
                 ? DeepSeekHarness.remove(store)
                 : hermes
                   ? Hermes.remove(store, Hermes.paths({ profile: flag("profile") }).home)
-                  : ClaudeCode.remove(store)
+                  : openclaw
+                    ? OpenClaw.remove(store, OpenClaw.paths({ profile: flag("profile") }).config)
+                    : ClaudeCode.remove(store)
           // The installed copy stays while another agent's settings still run it.
           const used = [
             ClaudeCode.manifestFile(store),
@@ -587,6 +634,7 @@ async function setup() {
             Codex.manifestFile(store),
             DeepSeekHarness.manifestFile(store),
             Hermes.manifestFile(store),
+            OpenClaw.manifestFile(store),
           ].some((file) => ConsoleStore.read(file) !== undefined)
           if (!used) CliInstall.uninstall(store)
           return done
@@ -610,7 +658,9 @@ async function setup() {
   const { ConsoleClient } = await import("./console-client")
   // Asked first, so the very first config fetch names the agent to the Console, by the product token it sends itself.
   // Hermes's version can carry git build metadata (`0.23.0+12.ge075441`), which its own requests leave out.
-  const found = await CliInstall.agentVersion(pi ? "pi" : codex ? "codex" : dsh ? "dsh" : hermes ? "hermes" : "claude")
+  const found = await CliInstall.agentVersion(
+    pi ? "pi" : codex ? "codex" : dsh ? "dsh" : hermes ? "hermes" : openclaw ? "openclaw" : "claude",
+  )
   const agent = hermes ? found?.replace(/\+.*$/, "") : found
   if (agent)
     harness = pi
@@ -621,7 +671,9 @@ async function setup() {
           ? `deepseek-harness/${agent}`
           : hermes
             ? `HermesAgent/${agent}`
-            : `claude-cli/${agent}`
+            : openclaw
+              ? `openclaw/${agent}`
+              : `claude-cli/${agent}`
   const signedIn = ConsoleCredentials.read(store)
   const requested = flag("server")
   if (!signedIn || (requested !== undefined && signedIn.server !== ConsoleClient.normalizeServer(requested)))
@@ -659,6 +711,7 @@ async function setup() {
   if (CliInstall.retarget(store, command).length > 0) await refreshAgents(store, true)
   if (codex) return setupCodex(store, command, synced.snapshot, agent, keepProvider)
   if (hermes) return setupHermes(store, command, synced.snapshot, agent, keepProvider)
+  if (openclaw) return setupOpenClaw(store, command, synced.snapshot, agent, keepProvider)
   if (dsh) {
     const { DeepSeekHarness } = await import("./deepseek-harness")
     // The plugin sits beside the entry: the `dsh-plugin.js` the binary wrote or the npm bundle has, which DeepSeek
@@ -961,6 +1014,70 @@ async function setupHermes(
   if (!agent) process.stderr.write("\nHermes Agent isn't on your PATH yet; this applies once it's installed.\n")
   process.stdout.write(
     "\nRun hermes to start. Hermes loads plugins when its gateway starts, so restart a running one with hermes gateway restart.\n",
+  )
+  return 0
+}
+
+/**
+ * Connects an OpenClaw install: the workspace's models through the gateway, the plugin that checks every tool call and
+ * serves the gateway MCP servers' tokens from memory, the workspace's MCP servers, and its instructions and skills.
+ */
+async function setupOpenClaw(
+  store: ConsoleStore.Info,
+  command: readonly string[],
+  snapshot: WorkspaceSnapshot.Info,
+  agent: string | undefined,
+  keepProvider: boolean,
+) {
+  const { OpenClaw } = await import("./openclaw")
+  const { WorkspaceSnapshot } = await import("./snapshot")
+  // The Gateway runs the plugin's commands in its own environment, often a service's, so they're given where the
+  // sign-in is and which Console it's for. `OPENCODE_API_KEY` is a secret and never goes in OpenClaw's files.
+  const environment = Object.fromEntries(
+    ["XDG_DATA_HOME", "XDG_CACHE_HOME", "OPENCODE_CONSOLE_SERVER"].flatMap((key) =>
+      process.env[key] ? [[key, process.env[key]]] : [],
+    ),
+  )
+  const paths = OpenClaw.paths({ profile: flag("profile") })
+  const applied = await withConsole(
+    OpenClaw.refresh(store, {
+      paths,
+      command,
+      environment,
+      harness: agent ? `openclaw/${agent}` : undefined,
+      keepProvider,
+    }),
+  )
+  if (!applied) {
+    process.stderr.write("Couldn't read the workspace config. Run setup again.\n")
+    return 1
+  }
+  const workspace = snapshot.organization ?? "your workspace"
+  const lines = [
+    connected("OpenClaw", workspace, Boolean(applied.models)),
+    "",
+    `  Config     ${paths.config}`,
+    applied.models
+      ? `  Models     ${count(applied.models.models.length, "model", "models")} as opencode-console/<model>; new sessions start on opencode-console/${applied.models.model}`
+      : applied.keepProvider
+        ? "  Models     OpenClaw keeps its own providers and models"
+        : "  Models     none from the workspace, so OpenClaw keeps its own providers",
+    `  Policies   ${count(WorkspaceSnapshot.policies(snapshot)?.length ?? 0, "rule", "rules")}, checked before every tool call, in chat, channels and cron alike`,
+    ...(applied.servers.length > 0 ? [`  MCP        ${applied.servers.join(", ")}`] : []),
+    ...instructionsAndSkills(applied.instructions, applied.skills),
+  ]
+  process.stdout.write(`${lines.join("\n")}\n`)
+  if (applied.skipped.length > 0)
+    process.stderr.write(
+      `\nLeft out ${applied.skipped.join(", ")}: you already have your own of the same name, or the server needs a header OpenClaw can't take from a secret.\n`,
+    )
+  if (applied.waiting)
+    process.stderr.write(
+      `\nThe workspace's instructions go in ${applied.agents}, which OpenClaw creates when it first runs; they're added on the next sync after that.\n`,
+    )
+  if (!agent) process.stderr.write("\nOpenClaw isn't on your PATH yet; this applies once it's installed.\n")
+  process.stdout.write(
+    "\nOpenClaw loads plugins when its Gateway starts, so restart a running one with openclaw gateway restart.\n",
   )
   return 0
 }
@@ -1294,6 +1411,7 @@ async function refreshAgents(store: ConsoleStore.Info, quiet: boolean) {
   const { Codex } = await import("./codex")
   const { DeepSeekHarness } = await import("./deepseek-harness")
   const { Hermes } = await import("./hermes")
+  const { OpenClaw } = await import("./openclaw")
   const failed = (agent: string) => (error: unknown) => {
     if (!quiet) process.stderr.write(`Couldn't update ${agent}: ${message(error)}\n`)
   }
@@ -1302,6 +1420,7 @@ async function refreshAgents(store: ConsoleStore.Info, quiet: boolean) {
   await withConsole(Codex.refresh(store)).catch(failed("Codex"))
   await withConsole(DeepSeekHarness.refresh(store)).catch(failed("DeepSeek Harness"))
   await withConsole(Hermes.refresh(store, undefined, harness)).catch(failed("Hermes Agent"))
+  await withConsole(OpenClaw.refresh(store, undefined, harness)).catch(failed("OpenClaw"))
 }
 
 /** Writes the extension and plugin a compiled binary carries beside the install, and keeps Pi loading the installed one. */
@@ -1545,7 +1664,7 @@ async function waitFor<A>(read: () => A | undefined, timeout: number) {
 
 /** Blocks what a hook was asked about, in its event's format, with exit code 2. */
 async function refuse(reason: string) {
-  if (parsed.positionals[1] === "hermes") {
+  if (parsed.positionals[1] === "hermes" || parsed.positionals[1] === "openclaw") {
     process.stdout.write(`${JSON.stringify({ action: "block", message: reason })}\n`)
     process.stderr.write(`${reason}\n`)
     return 2
@@ -1610,11 +1729,11 @@ Commands:
   artifact list [--json]  List the workspace's artifacts
   artifact delete <name> [--json]
                           Delete an artifact you shared (owners and admins can delete any)
-  setup <claude-code|pi|codex|deepseek-harness|hermes>
-                          Sign in if needed and set up Claude Code, Pi, Codex, DeepSeek Harness or
-                          Hermes Agent to use the workspace (--remove undoes it). With
-                          --keep-provider, Claude Code, Codex or Hermes keeps its own sign-in and
-                          models; --profile <name> picks a Hermes profile
+  setup <claude-code|pi|codex|deepseek-harness|hermes|openclaw>
+                          Sign in if needed and set up Claude Code, Pi, Codex, DeepSeek Harness,
+                          Hermes Agent or OpenClaw to use the workspace (--remove undoes it). With
+                          --keep-provider, Claude Code, Codex, Hermes or OpenClaw keeps its own
+                          sign-in and models; --profile <name> picks a Hermes or OpenClaw profile
   login [--server <url>]  Sign in to OpenCode Console and pick a workspace
   logout                  Sign out and remove the stored workspace config
   status [--json]         Show the sign-in, workspace and config
@@ -1627,8 +1746,9 @@ Commands:
   check                   Check a tool call against the workspace's policies. Reads
                           {"action": "...", "resources": [...]} on stdin, with optional
                           "directory", "path" and "shell"; exits 0 to allow, 2 to deny
-  hook <claude-code|codex|hermes>
-                          Answer a Claude Code, Codex or Hermes plugin hook (setup registers it)
+  hook <claude-code|codex|hermes|openclaw>
+                          Answer a Claude Code, Codex, Hermes or OpenClaw plugin hook (setup
+                          registers it)
   mcp-headers <server>    Print a workspace MCP server's headers (setup registers it)
   mcp-watches             Serve the watch, unwatch, watches and events tools over stdio MCP
                           (setup registers it). With --next-prompt, they say an idle session gets
