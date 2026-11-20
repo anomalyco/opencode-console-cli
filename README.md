@@ -3,9 +3,9 @@
 <a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-built-with-g-dark-20.svg"><img alt="Built with OpenCode" src="https://opencode.ai/brand/badges/opencode-built-with-g-light-20.svg" height="20" /></picture></a>
 <a href="https://opencode.ai"><picture><source media="(prefers-color-scheme: dark)" srcset="https://opencode.ai/brand/badges/opencode-works-with-g-dark-20.svg"><img alt="Works with OpenCode" src="https://opencode.ai/brand/badges/opencode-works-with-g-light-20.svg" height="20" /></picture></a>
 
-Connects Claude Code, Pi, Codex, DeepSeek Harness and Hermes Agent to an OpenCode Console workspace. They then use the
-workspace's models and any MCP servers, skills and instructions it has, and their tool calls follow the workspace's
-policies. OpenCode connects to Console on its own, so OpenCode users don't need this package.
+Connects Claude Code, Pi, Codex, DeepSeek Harness, Hermes Agent and OpenClaw to an OpenCode Console workspace. They then
+use the workspace's models and any MCP servers, skills and instructions it has, and their tool calls follow the
+workspace's policies. OpenCode connects to Console on its own, so OpenCode users don't need this package.
 
 ## Set up Claude Code
 
@@ -30,9 +30,9 @@ On Windows, in PowerShell:
 
 The installer downloads the binary for your computer from Anomaly's release service (`https://anoma.ly/release`), checks
 its size, SHA-256 and signature, runs its self-test, then runs `setup` with it. Replace `claude-code` with `pi`,
-`codex`, `deepseek-harness` or `hermes` for another agent. On Linux it needs OpenSSL 3 to check the signature. Put
-`--channel beta` or `--channel dev` before `setup` to install a prerelease, or `--version <version>` to install a
-specific release from npm.
+`codex`, `deepseek-harness`, `hermes` or `openclaw` for another agent. On Linux it needs OpenSSL 3 to check the
+signature. Put `--channel beta` or `--channel dev` before `setup` to install a prerelease, or `--version <version>` to
+install a specific release from npm.
 
 ## Set up Pi
 
@@ -58,6 +58,7 @@ so Codex runs them without asking in `/hooks`.
 npx @opencode/console setup claude-code --keep-provider
 npx @opencode/console setup codex --keep-provider
 npx @opencode/console setup hermes --keep-provider
+npx @opencode/console setup openclaw --keep-provider
 ```
 
 Claude Code or Codex keeps your own sign-in and models, and still gets the workspace's policies, plus any MCP servers,
@@ -65,8 +66,8 @@ skills and instructions the workspace has. They then report each request's token
 which counts them in its usage and the Leaderboard's Tokens ranking at $0. They never send prompts or code. Codex
 reports them from a hook after each model response; it needs Codex 0.164.0 or later. An OpenTelemetry endpoint you
 already set for Claude Code stays yours, and Claude Code reports nothing to the workspace.
-`npx @opencode/console status` shows which applies. Hermes keeps its own providers and models the same way, and sends
-no usage. Run setup without `--keep-provider` to use the workspace's models again.
+`npx @opencode/console status` shows which applies. Hermes and OpenClaw keep their own providers and models the same
+way, and send no usage. Run setup without `--keep-provider` to use the workspace's models again.
 
 ## Set up DeepSeek Harness
 
@@ -90,6 +91,19 @@ adds a plugin in `plugins/opencode-console` and any of the workspace's instructi
 workspace's models, and every tool call and `/skill` goes through the workspace's policies, in `hermes` chat, the
 messaging gateway and cron alike. It needs Hermes Agent 0.22.6 or later. Hermes loads plugins when its gateway starts,
 so run `hermes gateway restart` after setup. Hermes doesn't watch Slack threads or GitHub work yet.
+
+## Set up OpenClaw
+
+```sh
+npx @opencode/console setup openclaw
+```
+
+Setup writes `~/.openclaw/openclaw.json` (or `OPENCLAW_CONFIG_PATH`, `$OPENCLAW_STATE_DIR/openclaw.json`,
+`OPENCLAW_PROFILE`'s, or `--profile <name>`'s at `~/.openclaw-<name>/openclaw.json`), adds the `opencode-console`
+plugin, models, MCP servers and skills, and puts any workspace instructions in the default agent's `AGENTS.md`. On a
+fresh install, setup waits for OpenClaw to create `AGENTS.md`, writes the instructions on the first tool call after
+that, and they apply from the next session. Every tool call goes through the workspace's policies, in chat, channels
+and cron alike. OpenClaw loads plugins when its Gateway starts, so run `openclaw gateway restart` after setup.
 
 ## Watch Slack threads, GitHub work and MCP server events
 
@@ -161,6 +175,7 @@ npx @opencode/console setup pi --remove            # Undo the Pi setup and keep 
 npx @opencode/console setup codex --remove         # Undo the Codex setup and keep the sign-in
 npx @opencode/console setup deepseek-harness --remove  # Undo the DeepSeek Harness setup and keep the sign-in
 npx @opencode/console setup hermes --remove        # Undo the Hermes setup for the profile and keep the sign-in
+npx @opencode/console setup openclaw --remove      # Undo the OpenClaw setup for the install and keep the sign-in
 npx @opencode/console logout                       # Sign out
 ```
 
