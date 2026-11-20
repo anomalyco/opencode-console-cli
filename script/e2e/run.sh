@@ -101,6 +101,7 @@ node "$ROOT/npm/index.js" setup hermes > "$ROOT/setup-hermes.log" 2>&1; status=$
 check "setup hermes from the Node copy exited 0" '[ $status -eq 0 ]'
 check "Hermes's plugin runs the Node copy" 'grep -q "$DATA/cli/index.js" "$HOME/.hermes/plugins/opencode-console/__init__.py"'
 node "$ROOT/npm/index.js" setup openclaw > "$ROOT/setup-openclaw.log" 2>&1; status=$?
+sed 's/^/    /' "$ROOT/setup-openclaw.log"
 check "setup openclaw from the Node copy exited 0" '[ $status -eq 0 ]'
 check "OpenClaw's plugin runs the Node copy" 'grep -q "$DATA/cli/index.js" "$(openclaw_plugin)"'
 check "openclaw.json loads the plugin and holds no token" 'grep -q "opencode-console" "$HOME/.openclaw/openclaw.json" && ! grep -q "access-\|ocgw_" "$HOME/.openclaw/openclaw.json"'

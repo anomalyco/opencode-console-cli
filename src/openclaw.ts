@@ -5,7 +5,15 @@ import { rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Effect, Option, Schema } from "effect"
-import { applyEdits, type FormattingOptions, modify, type ParseError, parse, printParseErrorCode } from "jsonc-parser"
+// The ESM build: the package's main is a UMD build whose lazy requires Bun's bundler can't follow into the npm bundle.
+import {
+  applyEdits,
+  type FormattingOptions,
+  modify,
+  type ParseError,
+  parse,
+  printParseErrorCode,
+} from "jsonc-parser/lib/esm/main.js"
 import { version } from "../package.json" with { type: "json" }
 import { ConsoleClient } from "./console-client"
 import { ConsoleCredentials } from "./credentials"

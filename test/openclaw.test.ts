@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
 import type { HttpClient } from "effect/http"
-import { parse } from "jsonc-parser"
+import { parse } from "jsonc-parser/lib/esm/main.js"
 import { OpenClaw } from "../src/openclaw"
 import { WorkspaceSync } from "../src/workspace-sync"
 import { version } from "../package.json" with { type: "json" }
