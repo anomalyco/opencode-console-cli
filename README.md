@@ -100,10 +100,18 @@ npx @opencode/console setup openclaw
 
 Setup writes `~/.openclaw/openclaw.json` (or `OPENCLAW_CONFIG_PATH`, `$OPENCLAW_STATE_DIR/openclaw.json`,
 `OPENCLAW_PROFILE`'s, or `--profile <name>`'s at `~/.openclaw-<name>/openclaw.json`), adds the `opencode-console`
-plugin, models, MCP servers and skills, and puts any workspace instructions in the default agent's `AGENTS.md`. On a
-fresh install, setup waits for OpenClaw to create `AGENTS.md`, writes the instructions on the first tool call after
-that, and they apply from the next session. Every tool call goes through the workspace's policies, in chat, channels
-and cron alike. OpenClaw loads plugins when its Gateway starts, so run `openclaw gateway restart` after setup.
+plugin, MCP servers and skills, and puts any workspace instructions in the default agent's `AGENTS.md`. On a fresh
+install, setup waits for OpenClaw to create `AGENTS.md`, writes the instructions on the first tool call after that, and
+they apply from the next session. Every tool call goes through the workspace's policies, in chat, channels and cron
+alike. OpenClaw loads plugins when its Gateway starts, so run `openclaw gateway restart` after setup.
+
+The models come from OpenClaw's own `opencode` (Zen) and `opencode-go` (Go) providers: for each one the workspace
+offers, setup runs `openclaw models auth login --provider <provider> --method oauth`, which shows a code to approve in
+OpenCode Console, and OpenClaw keeps and refreshes that sign-in itself. An install that names no model yet starts new
+sessions on the provider's starter model. Without a terminal, or on an OpenClaw release without OpenCode browser
+sign-in, setup prints the command to run instead, and an API key works too
+(`openclaw models auth paste-api-key --provider opencode`). `--remove` leaves OpenClaw's sign-in in place;
+`openclaw models auth logout` signs it out.
 
 ## Watch Slack threads, GitHub work and MCP server events
 

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -7,6 +7,7 @@ import type { Effect } from "effect"
 import type { ClaudeCodeHook } from "./claude-code-hook"
 import type { DeepSeekHarness } from "./deepseek-harness"
 import type { HttpClient } from "effect/http"
+import type { OpenClaw } from "./openclaw"
 import type { PolicyEvaluator } from "./policy-evaluator"
 import type { WorkspaceSnapshot } from "./snapshot"
 import type { ConsoleStore } from "./store"
@@ -643,7 +644,7 @@ async function setup() {
     )
     process.stdout.write(
       removed
-        ? `Removed OpenCode Console from ${name} and restored its settings. You're still signed in; \`npx @opencode/console logout\` signs out.\n`
+        ? `Removed OpenCode Console from ${name} and restored its settings. You're still signed in; \`npx @opencode/console logout\` signs out.\n${openclaw ? "OpenClaw keeps its own sign-in to OpenCode Console; `openclaw models auth logout <profile>` signs it out (`openclaw models auth list` names them).\n" : ""}`
         : `${name} wasn't set up with OpenCode Console\n`,
     )
     return 0
@@ -1019,8 +1020,9 @@ async function setupHermes(
 }
 
 /**
- * Connects an OpenClaw install: the workspace's models through the gateway, the plugin that checks every tool call and
- * serves the gateway MCP servers' tokens from memory, the workspace's MCP servers, and its instructions and skills.
+ * Connects an OpenClaw install: the plugin that checks every tool call and serves the gateway MCP servers' tokens from
+ * memory, the workspace's MCP servers, its instructions and skills, and then OpenClaw's own browser sign-in to OpenCode
+ * Console for each OpenCode catalog the workspace offers, which brings the workspace's models.
  */
 async function setupOpenClaw(
   store: ConsoleStore.Info,
@@ -1039,34 +1041,28 @@ async function setupOpenClaw(
     ),
   )
   const paths = OpenClaw.paths({ profile: flag("profile") })
-  const applied = await withConsole(
-    OpenClaw.refresh(store, {
-      paths,
-      command,
-      environment,
-      harness: agent ? `openclaw/${agent}` : undefined,
-      keepProvider,
-    }),
-  )
+  const applied = await withConsole(OpenClaw.refresh(store, { paths, command, environment }))
   if (!applied) {
     process.stderr.write("Couldn't read the workspace config. Run setup again.\n")
     return 1
   }
+  const providers = keepProvider ? [] : await openclawProviders(store)
   const workspace = snapshot.organization ?? "your workspace"
-  const lines = [
-    connected("OpenClaw", workspace, Boolean(applied.models)),
-    "",
-    `  Config     ${paths.config}`,
-    applied.models
-      ? `  Models     ${count(applied.models.models.length, "model", "models")} as opencode-console/<model>; new sessions start on opencode-console/${applied.models.model}`
-      : applied.keepProvider
+  process.stdout.write(
+    `${[
+      connected("OpenClaw", workspace, providers.length > 0),
+      "",
+      `  Config     ${paths.config}`,
+      keepProvider
         ? "  Models     OpenClaw keeps its own providers and models"
-        : "  Models     none from the workspace, so OpenClaw keeps its own providers",
-    `  Policies   ${count(WorkspaceSnapshot.policies(snapshot)?.length ?? 0, "rule", "rules")}, checked before every tool call, in chat, channels and cron alike`,
-    ...(applied.servers.length > 0 ? [`  MCP        ${applied.servers.join(", ")}`] : []),
-    ...instructionsAndSkills(applied.instructions, applied.skills),
-  ]
-  process.stdout.write(`${lines.join("\n")}\n`)
+        : providers.length > 0
+          ? `  Models     OpenClaw's ${providers.join(" and ")} provider${providers.length > 1 ? "s" : ""}, through its own sign-in to OpenCode Console`
+          : "  Models     none from the workspace's OpenCode catalogs, so OpenClaw keeps its own providers",
+      `  Policies   ${count(WorkspaceSnapshot.policies(snapshot)?.length ?? 0, "rule", "rules")}, checked before every tool call, in chat, channels and cron alike`,
+      ...(applied.servers.length > 0 ? [`  MCP        ${applied.servers.join(", ")}`] : []),
+      ...instructionsAndSkills(applied.instructions, applied.skills),
+    ].join("\n")}\n`,
+  )
   if (applied.skipped.length > 0)
     process.stderr.write(
       `\nLeft out ${applied.skipped.join(", ")}: you already have your own of the same name, or the server needs a header OpenClaw can't take from a secret.\n`,
@@ -1075,12 +1071,74 @@ async function setupOpenClaw(
     process.stderr.write(
       `\nThe workspace's instructions go in ${applied.agents}, which OpenClaw creates when it first runs; they're added on the next sync after that.\n`,
     )
+  const failed = agent ? await signInOpenClaw(paths, providers) : providers
   if (!agent) process.stderr.write("\nOpenClaw isn't on your PATH yet; this applies once it's installed.\n")
+  if (failed.length > 0)
+    process.stderr.write(
+      `\nSign OpenClaw in to OpenCode Console with:\n${failed
+        .map((provider) => `  ${openclawInvocation(OpenClaw.signInCommand(paths, provider, false).args)}`)
+        .join(
+          "\n",
+        )}\nAn OpenClaw without browser sign-in for OpenCode takes an API key instead: openclaw models auth paste-api-key --provider ${failed[0]}\n`,
+    )
   process.stdout.write(
     "\nOpenClaw loads plugins when its Gateway starts, so restart a running one with openclaw gateway restart.\n",
   )
   return 0
 }
+
+/** The OpenClaw providers whose catalogs the workspace offers models from; none when the models can't be read. */
+async function openclawProviders(store: ConsoleStore.Info) {
+  const { OpenClaw } = await import("./openclaw")
+  const { ConsoleClient } = await import("./console-client")
+  const { ConsoleCredentials } = await import("./credentials")
+  const { Effect } = await import("effect")
+  const document = await withConsole(
+    Effect.gen(function* () {
+      const credential = yield* ConsoleCredentials.fresh(store)
+      return credential ? yield* ConsoleClient.fetchModels(credential) : undefined
+    }),
+  ).catch(() => undefined)
+  return document ? OpenClaw.signInProviders(document) : []
+}
+
+/**
+ * Signs the install in to each provider it isn't signed in to yet, with OpenClaw's own browser sign-in, which shows its
+ * code and waits for the member to approve it. Only the first sign-in sets the model new sessions start on, and only
+ * when the install names none. Returns the providers left to sign in: all of them without a terminal to approve in.
+ */
+async function signInOpenClaw(paths: OpenClaw.Paths, providers: readonly OpenClaw.SignInProvider[]) {
+  const { OpenClaw } = await import("./openclaw")
+  const pending = providers.filter((provider) => {
+    const listed = runOpenClaw(OpenClaw.signInListCommand(provider), paths, "pipe")
+    return !(listed.status === 0 && OpenClaw.signedIn(String(listed.stdout ?? "")))
+  })
+  if (pending.length === 0 || !process.stdin.isTTY) return pending
+  return pending.filter((provider) => {
+    process.stdout.write(`\nSigning OpenClaw in to OpenCode Console for ${provider}…\n`)
+    const { args } = OpenClaw.signInCommand(paths, provider, !OpenClaw.hasDefaultModel(paths))
+    return runOpenClaw(args, paths, "inherit").status !== 0
+  })
+}
+
+/**
+ * Runs `openclaw` for the install setup connected, named by its state directory and config rather than an inherited
+ * profile. On Windows that takes a shell, since npm installs it as a `.cmd` shim (see `CliInstall.versionProbe`).
+ */
+function runOpenClaw(args: readonly string[], paths: OpenClaw.Paths, stdio: "pipe" | "inherit") {
+  const { OPENCLAW_PROFILE: _profile, ...inherited } = process.env
+  const env = { ...inherited, OPENCLAW_STATE_DIR: paths.state, OPENCLAW_CONFIG_PATH: paths.config }
+  const windows = process.platform === "win32"
+  return spawnSync(windows ? openclawInvocation(args) : "openclaw", windows ? [] : [...args], {
+    env: windows ? { ...env, NoDefaultCurrentDirectoryInExePath: "1" } : env,
+    stdio,
+    shell: windows,
+    encoding: "utf8",
+    windowsHide: true,
+  })
+}
+
+const openclawInvocation = (args: readonly string[]) => ["openclaw", ...args].join(" ")
 
 // The switch setup flipped governs the member's own hooks as well as setup's, so setup says so.
 function hooksTurnedOn(change: string, file: string) {
@@ -1420,7 +1478,7 @@ async function refreshAgents(store: ConsoleStore.Info, quiet: boolean) {
   await withConsole(Codex.refresh(store)).catch(failed("Codex"))
   await withConsole(DeepSeekHarness.refresh(store)).catch(failed("DeepSeek Harness"))
   await withConsole(Hermes.refresh(store, undefined, harness)).catch(failed("Hermes Agent"))
-  await withConsole(OpenClaw.refresh(store, undefined, harness)).catch(failed("OpenClaw"))
+  await withConsole(OpenClaw.refresh(store)).catch(failed("OpenClaw"))
 }
 
 /** Writes the extension and plugin a compiled binary carries beside the install, and keeps Pi loading the installed one. */

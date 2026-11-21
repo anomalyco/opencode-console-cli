@@ -8,7 +8,6 @@ import type { HttpClient } from "effect/http"
 import { parse } from "jsonc-parser/lib/esm/main.js"
 import { OpenClaw } from "../src/openclaw"
 import { WorkspaceSync } from "../src/workspace-sync"
-import { version } from "../package.json" with { type: "json" }
 import { against, fakeConsole, removeStores, save, signIn, temporaryStore } from "./support/console"
 
 const homes: string[] = []
@@ -58,9 +57,8 @@ const gateway = {
 }
 
 /**
- * A member of Acme signed in, and an empty OpenClaw state directory. `run` is setup's sync and refresh, `keep` setup
- * with `--keep-provider`, and `sync` a later sync's, against a Console serving `config`, the models, `instructions`,
- * `skills` and their `bundles`.
+ * A member of Acme signed in, and an empty OpenClaw state directory. `run` is setup's sync and refresh, and `sync` a later
+ * sync's, against a Console serving `config`, the models, `instructions`, `skills` and their `bundles`.
  */
 function member(
   input: {
@@ -84,24 +82,15 @@ function member(
   const paths = OpenClaw.paths({ env: {}, home })
   const synced = <A, E>(refresh: Effect.Effect<A, E, HttpClient.HttpClient>) =>
     Effect.runPromise(WorkspaceSync.sync(store, { force: true }).pipe(Effect.andThen(refresh), against(console)))
-  const setup = (target = paths, keepProvider = false, cli = command) =>
-    synced(
-      OpenClaw.refresh(store, {
-        paths: target,
-        command: cli,
-        environment: {},
-        harness: "openclaw/2026.11.5",
-        keepProvider,
-      }),
-    )
+  const setup = (target = paths, cli = command) =>
+    synced(OpenClaw.refresh(store, { paths: target, command: cli, environment: {} }))
   return {
     store,
     home,
     paths,
     run: () => setup(),
-    keep: () => setup(paths, true),
     setup,
-    sync: (harness?: string) => synced(OpenClaw.refresh(store, undefined, harness)),
+    sync: () => synced(OpenClaw.refresh(store)),
     remove: (target = paths) => OpenClaw.remove(store, target.config),
   }
 }
@@ -174,36 +163,48 @@ test("finds hooks off when the plugin's files are gone", async () => {
   expect(hooksOff(openclaw)).toEqual(off(openclaw))
 })
 
-test("sends model requests to the gateway's Responses API with a token the plugin swaps in, starting on Claude Sonnet", async () => {
+test("leaves the models to OpenClaw's own sign-in: no model provider, and the member's model stays", async () => {
   const openclaw = member()
+  write(openclaw.paths.config, '{ "agents": { "defaults": { "model": { "primary": "openai/gpt-5.5" } } } }\n')
 
   await openclaw.run()
 
   const config = json(openclaw.paths.config)
-  expect(config.agents).toEqual({ defaults: { model: { primary: "opencode-console/claude-sonnet-4-6" } } })
-  expect(config.models.providers["opencode-console"]).toEqual({
-    name: "OpenCode Console",
-    baseUrl: "https://console.test/inference/openai/v1",
-    api: "openai-responses",
-    apiKey: "opencode-console-cli",
-    headers: { "x-opencode-plugin": `opencode-console/${version}`, "User-Agent": "openclaw/2026.11.5" },
-    models: [
-      { id: "gpt-5.2", name: "GPT-5.2", contextWindow: 400000, maxTokens: 128000, input: ["text", "image"] },
-      { id: "claude-sonnet-4-6", name: "claude-sonnet-4-6" },
-      { id: "opencode-go/kimi-k2.5", name: "Kimi K2.5 (OpenCode Go)" },
-    ],
-  })
+  expect(config.models).toBeUndefined()
+  expect(config.agents).toEqual({ defaults: { model: { primary: "openai/gpt-5.5" } } })
+  expect(read(path.join(OpenClaw.pluginDirectory(openclaw.store, openclaw.paths.config), "index.cjs"))).not.toContain(
+    "token --json",
+  )
 })
 
-test("names the release of the OpenClaw that last synced, so an upgraded OpenClaw says so on its next request", async () => {
+test("signs in to OpenClaw's provider for each OpenCode catalog the workspace offers, Zen's first", () => {
+  expect(OpenClaw.signInProviders(workspaceModels)).toEqual(["opencode", "opencode-go"])
+  expect(OpenClaw.signInProviders({ "opencode-go": workspaceModels["opencode-go"] })).toEqual(["opencode-go"])
+  expect(OpenClaw.signInProviders({})).toEqual([])
+})
+
+test("runs OpenClaw's browser sign-in for the install, setting a starter model only where none is named", () => {
+  const paths = OpenClaw.paths({ profile: "work", env: {}, home: "/home/ada" })
+
+  expect(OpenClaw.signInCommand(paths, "opencode-go", true)).toEqual({
+    args: ["models", "auth", "login", "--provider", "opencode-go", "--method", "oauth", "--set-default"],
+    env: {
+      OPENCLAW_STATE_DIR: "/home/ada/.openclaw-work",
+      OPENCLAW_CONFIG_PATH: "/home/ada/.openclaw-work/openclaw.json",
+    },
+  })
+  expect(OpenClaw.signInCommand(paths, "opencode", false).args).not.toContain("--set-default")
+})
+
+test("finds an install's default model and its saved sign-ins as OpenClaw reports them", () => {
   const openclaw = member()
-  await openclaw.run()
+  expect(OpenClaw.hasDefaultModel(openclaw.paths)).toBe(false)
+  write(openclaw.paths.config, '{ "agents": { "defaults": { "model": "openai/gpt-5.5" } } }\n')
+  expect(OpenClaw.hasDefaultModel(openclaw.paths)).toBe(true)
 
-  await openclaw.sync("openclaw/2026.12.1")
-
-  expect(json(openclaw.paths.config).models.providers["opencode-console"].headers["User-Agent"]).toBe(
-    "openclaw/2026.12.1",
-  )
+  expect(OpenClaw.signedIn('{"provider":"opencode-go","profiles":[{"id":"opencode-go:default"}]}')).toBe(true)
+  expect(OpenClaw.signedIn('Config warnings\n{"provider":"opencode-go","profiles":[]}')).toBe(false)
+  expect(OpenClaw.signedIn("not json")).toBe(false)
 })
 
 test("keeps the member's own settings and comments in openclaw.json as they wrote them", async () => {
@@ -216,7 +217,7 @@ test("keeps the member's own settings and comments in openclaw.json as they wrot
   await openclaw.run()
 
   expect(read(openclaw.paths.config)).toStartWith('{\n  // my settings\n  "gateway": { "port": 18789 }, // keep\n')
-  expect(json(openclaw.paths.config).agents.defaults.model).toEqual({ primary: "opencode-console/claude-sonnet-4-6" })
+  expect(json(openclaw.paths.config).agents.defaults.model).toBe("openai/gpt-5.5")
 })
 
 test("puts openclaw.json back byte for byte on --remove", async () => {
@@ -235,7 +236,6 @@ test("puts openclaw.json back byte for byte on --remove", async () => {
 
 test("keeps what the member changed since setup when it's removed, and takes out only setup's own", async () => {
   const openclaw = member()
-  write(openclaw.paths.config, '{ "agents": { "defaults": { "model": { "primary": "openai/gpt-5.5" } } } }\n')
   await openclaw.run()
   const config = json(openclaw.paths.config)
   write(
@@ -243,25 +243,16 @@ test("keeps what the member changed since setup when it's removed, and takes out
     JSON.stringify({
       ...config,
       gateway: { port: 1 },
-      agents: { defaults: { model: { primary: "opencode-console/gpt-5.2" } } },
+      agents: { defaults: { model: { primary: "opencode-go/kimi-k3" } } },
     }),
   )
 
   openclaw.remove()
 
   expect(json(openclaw.paths.config)).toEqual({
-    agents: { defaults: { model: { primary: "opencode-console/gpt-5.2" } } },
+    agents: { defaults: { model: { primary: "opencode-go/kimi-k3" } } },
     gateway: { port: 1 },
   })
-})
-
-test("leaves OpenClaw as it is when the member has a model provider of the same name", async () => {
-  const openclaw = member()
-  const theirs = '{ "models": { "providers": { "opencode-console": { "baseUrl": "http://localhost:8080/v1" } } } }\n'
-  write(openclaw.paths.config, theirs)
-
-  await expect(openclaw.run()).rejects.toThrow("already has a model provider named opencode-console")
-  expect(read(openclaw.paths.config)).toBe(theirs)
 })
 
 test("leaves a JSON5 openclaw.json it can't edit safely as it is", async () => {
@@ -271,19 +262,6 @@ test("leaves a JSON5 openclaw.json it can't edit safely as it is", async () => {
 
   await expect(openclaw.run()).rejects.toThrow("isn't JSON setup can edit")
   expect(read(openclaw.paths.config)).toBe(theirs)
-})
-
-test("keeps the member's own providers and models with --keep-provider, and still loads the plugin", async () => {
-  const openclaw = member()
-  write(openclaw.paths.config, '{ "agents": { "defaults": { "model": { "primary": "anthropic/claude-opus-5" } } } }\n')
-
-  const applied = await openclaw.keep()
-
-  const config = json(openclaw.paths.config)
-  expect(applied?.models).toBeUndefined()
-  expect(config.agents.defaults.model).toEqual({ primary: "anthropic/claude-opus-5" })
-  expect(config.models).toBeUndefined()
-  expect(config.plugins.entries).toEqual({ "opencode-console": { enabled: true } })
 })
 
 test("points gateway MCP servers at the plugin's in-memory auth profile, so no token is written to openclaw.json", async () => {
@@ -303,8 +281,9 @@ test("points gateway MCP servers at the plugin's in-memory auth profile, so no t
   expect(read(openclaw.paths.config)).not.toContain("ocgw_")
   const plugin = OpenClaw.pluginDirectory(openclaw.store, openclaw.paths.config)
   expect(read(path.join(plugin, "index.cjs"))).not.toContain("ocgw_")
-  expect(JSON.parse(read(path.join(plugin, "openclaw.plugin.json"))).contracts).toEqual({
-    externalAuthProviders: ["opencode-console"],
+  expect(JSON.parse(read(path.join(plugin, "openclaw.plugin.json")))).toMatchObject({
+    activation: { onStartup: true },
+    contracts: { externalAuthProviders: ["opencode-console"] },
   })
 })
 
@@ -453,7 +432,7 @@ type ProviderHooks = Record<string, (ctx: unknown) => unknown>
 
 /**
  * Setup's plugin, loaded as OpenClaw loads it, against a stand-in for the CLI: a script that answers `hook openclaw`
- * with `hook` and `exit`, `token --json` with a token, and `mcp-env` with `mcp`, recording what it was asked.
+ * with `hook` and `exit`, and `mcp-env` with `mcp`, recording what it was asked.
  */
 async function plugin(answers: {
   hook?: string
@@ -473,13 +452,12 @@ async function plugin(answers: {
 printf '%s\\n' "$*" >> '${log}'
 case "$*" in
   *"hook openclaw"*) cat >> '${log}'; printf '%s' '${answers.hook ?? "{}"}'; exit ${answers.exit ?? 0} ;;
-  *"token --json"*) printf '%s' '{"access_token":"tok_1","expires_in":600}' ;;
   *"mcp-env"*) printf '%s' '${JSON.stringify({ env: answers.mcp ?? {}, version: "v" })}' ;;
 esac
 `,
   )
   chmodSync(cli, 0o755)
-  await openclaw.setup(openclaw.paths, false, [cli])
+  await openclaw.setup(openclaw.paths, [cli])
   const entry = path.join(OpenClaw.pluginDirectory(openclaw.store, openclaw.paths.config), "index.cjs")
   const loaded: { register: (api: unknown) => void } = createRequire(import.meta.url)(entry)
   const hooks: Record<string, Hook> = {}
@@ -509,14 +487,11 @@ test("blocks a tool call the CLI denies, and one it can't get an answer for", as
   expect(denied.log()).toContain('"cwd":"/work/app"')
 })
 
-test("lets an allowed tool call through, swaps in a request token, and serves gateway MCP bearers from memory", async () => {
+test("lets an allowed tool call through and serves gateway MCP bearers from memory, without model credentials", async () => {
   const allowed = await plugin({ mcp: { OPENCODE_CONSOLE_MCP_WEB_SEARCH_AUTHORIZATION: "Bearer ocgw_live" } })
 
   expect(await allowed.hooks.before_tool_call!({ toolName: "read", params: { path: "a" } }, {})).toBeUndefined()
-  expect(await allowed.provider.prepareRuntimeAuthV2!({ capability: "chat" })).toMatchObject({ apiKey: "tok_1" })
-  expect(allowed.provider.resolveTransportTurnState!({ sessionId: "s1", turnId: "t" })).toEqual({
-    headers: { "x-opencode-session": "s1" },
-  })
+  expect(allowed.provider.prepareRuntimeAuthV2).toBeUndefined()
   expect(allowed.provider.resolveExternalAuthProfiles!({})).toMatchObject([
     {
       profileId: "opencode-console:web_search",

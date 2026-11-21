@@ -15,7 +15,7 @@ import {
   printParseErrorCode,
 } from "jsonc-parser/lib/esm/main.js"
 import { version } from "../package.json" with { type: "json" }
-import { ConsoleClient } from "./console-client"
+import type { ConsoleClient } from "./console-client"
 import { ConsoleCredentials } from "./credentials"
 import type { HooksCheck } from "./hooks-check"
 import { Instruction } from "./instruction"
@@ -82,15 +82,72 @@ export function paths(
   }
 }
 
-/** The model provider setup adds under `models.providers`, which sessions use as `opencode-console/<model>`. */
+/** The provider the plugin registers, which owns the auth profiles the gateway MCP servers' bearers come from. */
 export const PROVIDER = "opencode-console"
-/** The plugin's id, its entry under `plugins.entries`, and the provider it registers. */
+/** The plugin's id and its entry under `plugins.entries`. */
 export const PLUGIN = "opencode-console"
+
 /**
- * The non-secret `apiKey` OpenClaw needs before it asks the plugin for a request's credential: the plugin's
- * `prepareRuntimeAuthV2` replaces it with a token from `token --json` on every request.
+ * OpenClaw's own OpenCode providers, which serve the workspace's models: `opencode` Zen's, `opencode-go` Go's. Each signs
+ * in to OpenCode Console in the browser on its own (`openclaw models auth login`), since a refresh token serves one
+ * credential; OpenClaw keeps and refreshes the sign-in, so setup never handles its tokens.
  */
-export const KEY_MARKER = "opencode-console-cli"
+export const SIGN_IN_PROVIDERS = ["opencode", "opencode-go"] as const
+export type SignInProvider = (typeof SIGN_IN_PROVIDERS)[number]
+
+/** The OpenClaw providers whose catalogs the workspace offers models from, Zen's first. */
+export function signInProviders(document: ConsoleClient.ModelsDocument): SignInProvider[] {
+  const offered = new Set(WorkspaceModels.list(document).map((model) => model.provider))
+  return SIGN_IN_PROVIDERS.filter((provider) => offered.has(provider))
+}
+
+/**
+ * The `openclaw` arguments and environment that sign this install in to one provider with OpenCode Console in the
+ * browser. `--set-default` starts new sessions on the provider's starter model, so it's given only to an install that
+ * names no model yet.
+ */
+export function signInCommand(paths: Paths, provider: SignInProvider, setDefault: boolean) {
+  return {
+    args: [
+      "models",
+      "auth",
+      "login",
+      "--provider",
+      provider,
+      "--method",
+      "oauth",
+      ...(setDefault ? ["--set-default"] : []),
+    ],
+    env: { OPENCLAW_STATE_DIR: paths.state, OPENCLAW_CONFIG_PATH: paths.config },
+  }
+}
+
+/** The `openclaw` arguments that list this install's saved sign-ins for a provider, as JSON. */
+export const signInListCommand = (provider: SignInProvider) => [
+  "models",
+  "auth",
+  "list",
+  "--provider",
+  provider,
+  "--json",
+]
+
+/** Whether `openclaw models auth list --json` names a sign-in. Output it can't read counts as none. */
+export function signedIn(stdout: string) {
+  try {
+    const profiles = SettingsFile.record(JSON.parse(stdout.slice(Math.max(0, stdout.indexOf("{"))))).profiles
+    return Array.isArray(profiles) && profiles.length > 0
+  } catch {
+    return false
+  }
+}
+
+/** Whether the install's `openclaw.json` names a model new sessions start on. */
+export function hasDefaultModel(paths: Paths) {
+  const model = valueAt(readConfig(paths.config).value, ["agents", "defaults", "model"])
+  const primary = typeof model === "string" ? model : valueAt(model, ["primary"])
+  return typeof primary === "string" && primary.trim() !== ""
+}
 
 /** Where setup writes one install's plugin and workspace skills, keyed by its `openclaw.json`. */
 export function directory(store: ConsoleStore.Info, config: string) {
@@ -107,60 +164,6 @@ export const authProfile = (server: string) => `${PROVIDER}:${server}`
 /** The variable `mcp-env` names a gateway MCP server's Authorization header by. */
 export function headerVariable(server: string) {
   return `OPENCODE_CONSOLE_MCP_${`${server}_Authorization`.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`
-}
-
-/** One model in `models.providers.opencode-console.models`, in OpenClaw's model shape. */
-export const Model = Schema.Struct({
-  id: Schema.String,
-  name: Schema.String,
-  contextWindow: Schema.optional(Schema.Number),
-  maxTokens: Schema.optional(Schema.Number),
-  input: Schema.optional(Schema.Array(Schema.String)),
-})
-export type Model = typeof Model.Type
-
-/** The workspace's models as one OpenClaw model provider on the gateway's OpenAI Responses endpoint. */
-export const Provider = Schema.Struct({ baseUrl: Schema.String, model: Schema.String, models: Schema.Array(Model) })
-export type Provider = typeof Provider.Type
-
-/**
- * The chat models the member may use, by gateway ID (OpenCode's by their own IDs, then `opencode-go/<id>`, then
- * `console-<slug>/<id>`), all on the gateway's `/openai/v1`, which routes every one, and the newest Claude Sonnet as the
- * default (else the nearest family, else the first model). Undefined without any. OpenClaw's `openai-responses`
- * adapter is the one protocol every model behind the gateway answers.
- */
-export function provider(document: ConsoleClient.ModelsDocument): Provider | undefined {
-  const listed = WorkspaceModels.list(document)
-  const root = WorkspaceModels.inferenceRoot(listed)
-  const picked = WorkspaceModels.newest(listed, "sonnet", "opus", "haiku")
-  if (root === undefined || picked === undefined) return undefined
-  const id = (model: WorkspaceModels.Listed) =>
-    model.provider === "opencode" ? model.id : `${model.provider}/${model.id}`
-  const positive = (value: unknown) => (typeof value === "number" && value > 0 ? value : undefined)
-  return {
-    baseUrl: `${root}/openai/v1`,
-    model: id(picked),
-    models: listed.map((model) => {
-      const limit = SettingsFile.record(model.entry.limit)
-      const input = SettingsFile.record(model.entry.modalities).input
-      const name = SettingsFile.text(model.entry.name) ?? model.id
-      const context = positive(limit.context)
-      const output = positive(limit.output)
-      // models.dev names image input by type (`image/png`); OpenClaw takes `text` and `image`.
-      const listed = Array.isArray(input) ? input.filter((kind): kind is string => typeof kind === "string") : []
-      const kinds = [
-        ...(listed.includes("text") ? ["text"] : []),
-        ...(listed.some((kind) => kind === "image" || kind.startsWith("image/")) ? ["image"] : []),
-      ]
-      return {
-        id: id(model),
-        name: model.provider === "opencode" ? name : `${name} (${model.providerName ?? model.provider})`,
-        ...(context === undefined ? {} : { contextWindow: context }),
-        ...(output === undefined ? {} : { maxTokens: output }),
-        ...(kinds.length === 0 ? {} : { input: kinds }),
-      }
-    }),
-  }
 }
 
 /**
@@ -193,12 +196,6 @@ const Install = Schema.Struct({
   /** The command that runs the installed CLI, and the environment it finds the sign-in by. */
   command: Schema.Array(Schema.String),
   environment: Schema.Record(Schema.String, Schema.String),
-  /** OpenClaw's own product token, `openclaw/<release>`, which names it to the Console. */
-  harness: Schema.optional(Schema.String),
-  /** `agents.defaults.model.primary`, with the value it had before, and what setup last wrote. */
-  ...SettingsFile.OwnedFields,
-  /** Whether setup wrote `models.providers.opencode-console`. */
-  provider: Schema.Boolean,
   servers: Schema.Array(Schema.String),
   skills: Schema.Record(Schema.String, Schema.String),
   /** The `AGENTS.md` setup wrote the workspace's instructions to. */
@@ -210,10 +207,6 @@ const Install = Schema.Struct({
     loadPaths: Schema.Boolean,
     extraDirs: Schema.Boolean,
   }),
-  /** A fingerprint of the config's providers, and the provider setup made of them, reused while they're unchanged. */
-  providers: Schema.optional(Schema.String),
-  models: Schema.optional(Schema.NullOr(Provider)),
-  keepProvider: Schema.optional(Schema.Boolean),
 })
 type Install = typeof Install.Type
 
@@ -266,13 +259,11 @@ function loaded(list: unknown, folder: string) {
 
 /** What a sync made of an OpenClaw install, for setup to report. */
 export interface Applied {
-  readonly models: Provider | undefined
   readonly servers: readonly string[]
   readonly skills: readonly string[]
   readonly instructions: number
   /** Names setup left alone because the member already has their own server or skill there, or that can't be written. */
   readonly skipped: readonly string[]
-  readonly keepProvider: boolean
   /** The `AGENTS.md` the instructions went to. */
   readonly agents: string
   /** Whether the instructions wait for OpenClaw to create that `AGENTS.md`, as it does when it first runs. */
@@ -280,11 +271,11 @@ export interface Applied {
 }
 
 /**
- * Points an OpenClaw install at the workspace: its models through the gateway, the plugin that sends every tool call to
- * `hook openclaw` and serves the gateway's tokens, the workspace's MCP servers, its instructions in the default agent's
- * `AGENTS.md` and its skills. Each run brings the install up to date with the stored workspace config and writes only
- * what changed, so `sync` runs it, without `setup`, for every install setup connected; it does nothing for a member
- * who never ran setup.
+ * Points an OpenClaw install at the workspace: the plugin that sends every tool call to `hook openclaw` and serves the
+ * gateway MCP servers' tokens, the workspace's MCP servers, its instructions in the default agent's `AGENTS.md` and its
+ * skills. The models come from OpenClaw's own sign-in (`signInCommand`), which setup runs separately. Each run brings the
+ * install up to date with the stored workspace config and writes only what changed, so `sync` runs it, without `setup`,
+ * for every install setup connected; it does nothing for a member who never ran setup.
  */
 export const refresh = Effect.fn("OpenClaw.refresh")(function* (
   store: ConsoleStore.Info,
@@ -292,10 +283,7 @@ export const refresh = Effect.fn("OpenClaw.refresh")(function* (
     readonly paths: Paths
     readonly command: readonly string[]
     readonly environment: Readonly<Record<string, string>>
-    readonly harness?: string | undefined
-    readonly keepProvider?: boolean | undefined
   },
-  harness?: string,
 ) {
   const recorded = manifest(store)
   const targets = setup
@@ -305,27 +293,11 @@ export const refresh = Effect.fn("OpenClaw.refresh")(function* (
   const credential = yield* ConsoleCredentials.fresh(store)
   const snapshot = credential && WorkspaceSync.current(store, ConsoleCredentials.owner(credential))
   if (!credential || !snapshot?.config) return undefined
-  const fingerprint = createHash("sha256")
-    .update(JSON.stringify(snapshot.config.providers ?? null))
-    .digest("hex")
-  const keep = (previous: Install | undefined) =>
-    setup ? setup.keepProvider === true : previous?.keepProvider === true
-  // A background sync reuses the models setup last made while the config's providers are unchanged.
-  const fetched = targets.every(
-    ({ previous }) =>
-      keep(previous) || (!setup && previous?.providers === fingerprint && previous.models !== undefined),
-  )
-    ? undefined
-    : provider(yield* ConsoleClient.fetchModels(credential))
   const skills = WorkspaceSnapshot.skills(snapshot)
   const applied: Applied[] = []
   for (const { base, previous } of targets) {
     const folder = skillsDirectory(store, base.paths.config)
     const bundles = yield* Skill.fetchChanged(credential, folder, skills, previous?.skills ?? {})
-    const keepProvider = keep(previous)
-    const models = keepProvider
-      ? undefined
-      : (fetched ?? (previous?.providers === fingerprint ? (previous.models ?? undefined) : undefined))
     applied.push(
       yield* ConsoleStore.locked(
         store,
@@ -334,15 +306,10 @@ export const refresh = Effect.fn("OpenClaw.refresh")(function* (
             paths: base.paths,
             command: base.command,
             environment: base.environment,
-            harness: setup?.harness ?? (harness?.startsWith("openclaw/") ? harness : previous?.harness),
-            models,
             servers: WorkspaceSnapshot.servers(snapshot),
             instructions: WorkspaceSnapshot.instructions(snapshot),
             skills,
             bundles,
-            providers: fingerprint,
-            keepProvider,
-            explicit: setup !== undefined,
           }),
         ),
       ),
@@ -352,9 +319,9 @@ export const refresh = Effect.fn("OpenClaw.refresh")(function* (
 })
 
 /**
- * Undoes setup for one install: puts back `agents.defaults.model.primary` unless the member changed it since, and
- * removes the model provider, MCP servers, plugin, skills folder and instructions setup added. When nothing else in
- * `openclaw.json` changed since setup, the file is put back byte for byte. The sign-in stays.
+ * Undoes setup for one install: removes the MCP servers, plugin, skills folder and instructions setup added. When nothing
+ * else in `openclaw.json` changed since setup, the file is put back byte for byte. Both sign-ins stay: the CLI's, and
+ * OpenClaw's own to OpenCode Console, which OpenClaw keeps (`openclaw models auth logout` signs it out).
  */
 export function remove(store: ConsoleStore.Info, config: string) {
   const recorded = manifest(store)
@@ -364,8 +331,6 @@ export function remove(store: ConsoleStore.Info, config: string) {
   const file = readConfig(previous.paths.config)
   const agents = ConsoleStore.read(previous.instructions)
   const edit = editor(file.text ?? "")
-  if (PRIMARY in previous.originals) restorePrimary(edit, previous)
-  if (previous.provider) edit.delete(["models", "providers", PROVIDER])
   previous.servers.forEach((name) => edit.delete(["mcp", "servers", name]))
   edit.delete(["plugins", "entries", PLUGIN])
   edit.without(["plugins", "load", "paths"], pluginDirectory(store, config), previous.created.loadPaths)
@@ -390,23 +355,13 @@ interface Desired {
   readonly paths: Paths
   readonly command: readonly string[]
   readonly environment: Readonly<Record<string, string>>
-  readonly harness: string | undefined
-  readonly models: Provider | undefined
   readonly servers: Readonly<
     Record<string, { readonly url: string; readonly headers?: Readonly<Record<string, string>> | undefined }>
   >
   readonly instructions: readonly Instruction.Info[]
   readonly skills: readonly Skill.Info[]
   readonly bundles: readonly Skill.Bundle[]
-  readonly providers: string
-  readonly keepProvider: boolean
-  /** Setup run by the member, which sets every key again; a background sync leaves keys the member changed. */
-  readonly explicit: boolean
 }
-
-// The key setup owns, as SettingsFile records it (its keys go one level deep), and where it lives in `openclaw.json`.
-const PRIMARY = "primary"
-const PRIMARY_PATH = ["agents", "defaults", "model", "primary"]
 
 function apply(store: ConsoleStore.Info, desired: Desired): Applied {
   // Everything is read before anything is written, so a file setup can't read leaves every file as it was.
@@ -419,31 +374,6 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
   const has = (keys: readonly string[]) => valueAt(current, keys) !== undefined
   const plugin = pluginDirectory(store, desired.paths.config)
   const skills = skillsDirectory(store, desired.paths.config)
-
-  // The model provider: setup's own is replaced whole; one the member wrote under the same name stays theirs.
-  if (desired.models && !previous?.provider && has(["models", "providers", PROVIDER]))
-    throw new Error(
-      `${desired.paths.config} already has a model provider named ${PROVIDER}, so OpenClaw was left as it is. Rename it and run setup again.`,
-    )
-  if (desired.models) edit.set(["models", "providers", PROVIDER], providerEntry(desired))
-  else if (previous?.provider) edit.delete(["models", "providers", PROVIDER])
-
-  // `agents.defaults.model.primary`, which sessions start on. A plain `model: "<ref>"` is OpenClaw's short form of it.
-  const model = valueAt(current, ["agents", "defaults", "model"])
-  if (typeof model === "string") edit.set(["agents", "defaults", "model"], { primary: model })
-  const primary = typeof model === "string" ? model : valueAt(current, ["agents", "defaults", "model", "primary"])
-  const settings: SettingsFile.Settings = primary === undefined ? {} : { [PRIMARY]: primary }
-  const { originals, written } = SettingsFile.apply(
-    settings,
-    desired.models ? { [PRIMARY]: `${PROVIDER}/${desired.models.model}` } : {},
-    previous,
-    desired.explicit,
-  )
-  if (PRIMARY in { ...previous?.originals, ...originals }) {
-    const value = settings[PRIMARY]
-    if (value === undefined) edit.delete(PRIMARY_PATH)
-    else edit.set(PRIMARY_PATH, value)
-  }
 
   // MCP servers: a gateway server's bearer comes from the plugin's in-memory auth profile, a direct server signs in
   // with OpenClaw's own MCP OAuth. A server the member added under the same name stays theirs.
@@ -505,10 +435,6 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
     paths: desired.paths,
     command: [...desired.command],
     environment: { ...desired.environment },
-    ...(desired.harness === undefined ? {} : { harness: desired.harness }),
-    originals: { ...originals },
-    written: { ...written },
-    provider: desired.models !== undefined,
     servers,
     skills: synced.skills,
     instructions: agents,
@@ -518,22 +444,17 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
       loadPaths: previous?.created.loadPaths ?? loadPaths,
       extraDirs: previous?.created.extraDirs ?? extraDirs,
     },
-    providers: desired.providers,
-    models: desired.models ?? null,
-    ...(desired.keepProvider ? { keepProvider: true } : {}),
   })
   ConsoleStore.write(
     manifestFile(store),
     JSON.stringify(Manifest.make({ profiles: { ...recorded?.profiles, [desired.paths.config]: install } })),
   )
   return {
-    models: desired.models,
     servers,
     skills: Object.keys(synced.skills),
     instructions: waiting ? 0 : desired.instructions.length,
     waiting,
     skipped,
-    keepProvider: desired.keepProvider,
     agents,
   }
 }
@@ -556,28 +477,9 @@ function workspaceOf(config: Record<string, unknown>, paths: Paths) {
 }
 
 /**
- * The gateway as an OpenClaw model provider (docs.openclaw.ai/concepts/model-providers): the Responses API, the
- * plugin's request credential in place of `apiKey`, only the workspace's models, and `x-opencode-plugin` and OpenClaw's
- * product token naming this setup on every request. The plugin adds the conversation as `x-opencode-session`.
- */
-function providerEntry(desired: Desired) {
-  const models = desired.models!
-  return {
-    name: "OpenCode Console",
-    baseUrl: models.baseUrl,
-    api: "openai-responses",
-    apiKey: KEY_MARKER,
-    headers: {
-      "x-opencode-plugin": `opencode-console/${version}`,
-      ...(desired.harness === undefined ? {} : { "User-Agent": desired.harness }),
-    },
-    models: models.models.map((model) => ({ ...model })),
-  }
-}
-
-/**
- * The plugin's manifest (docs.openclaw.ai/plugins/manifest): it owns the `opencode-console` provider, whose request
- * credential it exchanges, and the auth profiles that carry the gateway MCP servers' bearers.
+ * The plugin's manifest (docs.openclaw.ai/plugins/manifest): it loads when the Gateway starts, and owns the
+ * `opencode-console` provider, whose auth profiles carry the gateway MCP servers' bearers. It serves no models; OpenClaw's
+ * own `opencode` and `opencode-go` do.
  */
 function pluginManifest() {
   return `${JSON.stringify(
@@ -585,9 +487,11 @@ function pluginManifest() {
       id: PLUGIN,
       name: "OpenCode Console",
       description:
-        "Checks tool calls against your OpenCode Console workspace's policies and connects its models and MCP servers. Written by npx @opencode/console setup openclaw.",
+        "Checks tool calls against your OpenCode Console workspace's policies and connects its MCP servers. Written by npx @opencode/console setup openclaw.",
       version,
       providers: [PROVIDER],
+      // Its policy hook must run from the Gateway's start; nothing references its provider to load it later.
+      activation: { onStartup: true },
       contracts: { externalAuthProviders: [PROVIDER] },
       configSchema: { type: "object", additionalProperties: false, properties: {} },
     },
@@ -598,11 +502,10 @@ function pluginManifest() {
 
 /**
  * The plugin, dependency-free CommonJS that hands every decision to the CLI. Each tool call goes to `hook openclaw`,
- * which answers from the stored workspace config, and anything that keeps it from answering blocks the call. Each
- * model request gets a token from `token --json`, kept until shortly before it expires, and the conversation's
- * `x-opencode-session`. The gateway MCP servers' bearers come from `mcp-env` and live only in this process, as
- * runtime-only auth profiles OpenClaw neither writes to its config nor stores. The first tool call after OpenClaw has
- * created the `AGENTS.md` the workspace's instructions wait for starts a sync that writes them.
+ * which answers from the stored workspace config, and anything that keeps it from answering blocks the call. The
+ * gateway MCP servers' bearers come from `mcp-env` and live only in this process, as runtime-only auth profiles OpenClaw
+ * neither writes to its config nor stores. The first tool call after OpenClaw has created the `AGENTS.md` the
+ * workspace's instructions wait for starts a sync that writes them.
  */
 function pluginSource(desired: Desired, servers: readonly string[], waiting: string | undefined) {
   const variables = Object.fromEntries(
@@ -659,21 +562,6 @@ function json(text) {
   } catch {
     return {};
   }
-}
-
-let token;
-async function modelToken(harness, signal) {
-  if (token && token.expiresAt - 60_000 > Date.now()) return token;
-  const done = await run([...harness, "token", "--json"], undefined, 20_000, signal);
-  const answer = json(done.stdout);
-  if (done.code !== 0 || typeof answer.access_token !== "string" || answer.access_token === "")
-    throw new Error((done.stderr || "").trim() || "opencode-console token failed; run npx @opencode/console login");
-  token = {
-    apiKey: answer.access_token,
-    // A key has no expiry; it's asked for again hourly so a revoked one stops being used.
-    expiresAt: Date.now() + (typeof answer.expires_in === "number" ? answer.expires_in * 1000 : 3_600_000),
-  };
-  return token;
 }
 
 const mcp = { at: 0, env: {}, pending: undefined };
@@ -743,14 +631,6 @@ module.exports = {
       id: PROVIDER,
       label: "OpenCode Console",
       auth: [],
-      async prepareRuntimeAuthV2(ctx) {
-        const { apiKey, expiresAt } = await modelToken(harness, ctx.signal);
-        return { apiKey, expiresAt };
-      },
-      resolveTransportTurnState(ctx) {
-        const session = (ctx.sessionId && ctx.sessionId.trim()) || (ctx.turnId && ctx.turnId.trim());
-        return session ? { headers: { "x-opencode-session": session } } : undefined;
-      },
       resolveExternalAuthProfiles() {
         const values = mcpEnv();
         return Object.entries(SERVERS).flatMap(([name, variable]) => mcpProfile(name, values[variable]) || []);
@@ -873,15 +753,6 @@ function editor(initial: string) {
       if (list.length - (index === -1 ? 0 : 1) === 0 && created) remove(keys)
     },
   }
-}
-
-// Puts the model new sessions start on back as it was before setup, unless the member changed it since.
-function restorePrimary(edit: ReturnType<typeof editor>, owned: SettingsFile.Owned) {
-  const now = valueAt(parseConfig(edit.text()), PRIMARY_PATH)
-  const settings: SettingsFile.Settings = now === undefined ? {} : { [PRIMARY]: now }
-  SettingsFile.restore(settings, PRIMARY, owned)
-  if (settings[PRIMARY] === undefined) edit.delete(PRIMARY_PATH)
-  else edit.set(PRIMARY_PATH, settings[PRIMARY])
 }
 
 // Objects left empty once setup's keys are out, which setup's edits may have dropped or the member may have written.
