@@ -5,6 +5,7 @@ import { Option, Schema } from "effect"
 import { ClaudeCode } from "./claude-code"
 import { Codex } from "./codex"
 import { Hermes } from "./hermes"
+import { OpenClaw } from "./openclaw"
 import { ConsoleStore } from "./store"
 
 /** What keeps an agent's policy hooks from running, and what puts them back when that's something other than setup. */
@@ -29,8 +30,9 @@ const agents = {
   "claude-code": { name: "Claude Code", token: "claude-cli/", check: ClaudeCode.hooksOff },
   codex: { name: "Codex", token: "codex_cli_rs/", check: Codex.hooksOff },
   hermes: { name: "Hermes Agent", token: "HermesAgent/", check: Hermes.hooksOff },
+  openclaw: { name: "OpenClaw", token: "openclaw/", check: OpenClaw.hooksOff },
 }
-const names = ["claude-code", "codex", "hermes"] as const satisfies ReadonlyArray<keyof typeof agents>
+const names = ["claude-code", "codex", "hermes", "openclaw"] as const satisfies ReadonlyArray<keyof typeof agents>
 export type Agent = (typeof names)[number]
 
 // A warning or report at most this often. Warnings are per session, keyed by the process that ran the helper; the

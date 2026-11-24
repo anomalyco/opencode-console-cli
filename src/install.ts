@@ -172,7 +172,7 @@ export function materialize(store: ConsoleStore.Info) {
 
 /**
  * Points the agents setup connected before at `command`, when the install it runs changed shape, such as a Node copy
- * becoming a binary: Claude Code and Codex, and each Hermes profile. Each agent's next refresh writes it into the
+ * becoming a binary: Claude Code and Codex, each Hermes profile and each OpenClaw install. Each agent's next refresh writes it into the
  * agent's own settings.
  */
 export function retarget(store: ConsoleStore.Info, next: readonly string[]) {
@@ -184,19 +184,23 @@ export function retarget(store: ConsoleStore.Info, next: readonly string[]) {
     ConsoleStore.write(file, JSON.stringify({ ...manifest, command: next }))
     return [name]
   })
-  const hermes = path.join(store.data, "hermes.json")
-  const profiles = decoded(hermes, Schema.fromJsonString(Profiles))
-  if (!profiles || !Object.values(profiles.profiles).some((profile) => differs(profile.command))) return agents
-  ConsoleStore.write(
-    hermes,
-    JSON.stringify({
-      ...profiles,
-      profiles: Object.fromEntries(
-        Object.entries(profiles.profiles).map(([home, profile]) => [home, { ...profile, command: next }]),
-      ),
-    }),
-  )
-  return [...agents, "hermes.json"]
+  // Hermes's manifest lists each profile, and OpenClaw's each install, by the command that runs the CLI.
+  const profiled = ["hermes.json", "openclaw.json"].flatMap((name) => {
+    const file = path.join(store.data, name)
+    const profiles = decoded(file, Schema.fromJsonString(Profiles))
+    if (!profiles || !Object.values(profiles.profiles).some((profile) => differs(profile.command))) return []
+    ConsoleStore.write(
+      file,
+      JSON.stringify({
+        ...profiles,
+        profiles: Object.fromEntries(
+          Object.entries(profiles.profiles).map(([key, profile]) => [key, { ...profile, command: next }]),
+        ),
+      }),
+    )
+    return [name]
+  })
+  return [...agents, ...profiled]
 }
 
 // Every agent manifest that runs the CLI records the command (Hermes's per profile); the rest is its own module's.
