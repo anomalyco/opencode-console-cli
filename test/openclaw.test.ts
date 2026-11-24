@@ -196,6 +196,12 @@ test("runs OpenClaw's browser sign-in for the install, setting a starter model o
   expect(OpenClaw.signInCommand(paths, "opencode", false).args).not.toContain("--set-default")
 })
 
+test("installs OpenClaw's Zen provider plugin, which OpenClaw ships apart from its release, by its own command", () => {
+  expect(OpenClaw.pluginInspectCommand("opencode")).toEqual(["plugins", "inspect", "opencode", "--json"])
+  expect(OpenClaw.pluginInstallCommand("opencode")).toEqual(["plugins", "install", "@openclaw/opencode-provider"])
+  expect(OpenClaw.pluginInstallCommand("opencode-go")).toEqual(["plugins", "install", "@openclaw/opencode-go-provider"])
+})
+
 test("finds an install's default model and its saved sign-ins as OpenClaw reports them", () => {
   const openclaw = member()
   expect(OpenClaw.hasDefaultModel(openclaw.paths)).toBe(false)

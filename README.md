@@ -106,11 +106,12 @@ they apply from the next session. Every tool call goes through the workspace's p
 alike. OpenClaw loads plugins when its Gateway starts, so run `openclaw gateway restart` after setup.
 
 The models come from OpenClaw's own `opencode` (Zen) and `opencode-go` (Go) providers: for each one the workspace
-offers, setup runs `openclaw models auth login --provider <provider> --method oauth`, which shows a code to approve in
+offers, setup installs the provider's plugin if OpenClaw doesn't have it (`openclaw plugins install
+@openclaw/opencode-provider`; OpenClaw ships Go's with its release and Zen's apart from it), then runs `openclaw models auth login --provider <provider> --method oauth`, which shows a code to approve in
 OpenCode Console, and OpenClaw keeps and refreshes that sign-in itself. An install that names no model yet starts new
 sessions on the provider's starter model. Browser sign-in for OpenCode needs OpenClaw 2026.11.7 or later. Without a
 terminal, or on an older OpenClaw, setup prints the command to run instead, and an API key works too
-(`openclaw models auth paste-api-key --provider opencode`). `--remove` leaves OpenClaw's sign-in in place;
+(`openclaw models auth paste-api-key --provider opencode`). `--remove` leaves OpenClaw's sign-in and that plugin in place;
 `openclaw models auth logout` signs it out.
 
 ## Watch Slack threads, GitHub work and MCP server events

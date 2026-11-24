@@ -1253,6 +1253,7 @@ describe("setup openclaw", () => {
     expect(setup.code).toBe(0)
     expect(setup.stderr).toContain("openclaw models auth login --provider opencode --method oauth")
     expect(setup.stderr).toContain("openclaw models auth login --provider opencode-go --method oauth")
+    expect(setup.stderr).toContain("openclaw plugins install @openclaw/opencode-provider")
   })
 
   test("asks OpenClaw which sign-ins it holds, for the install setup connected, and names only the missing one", async () => {

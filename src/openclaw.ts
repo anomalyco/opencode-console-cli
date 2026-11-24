@@ -122,6 +122,21 @@ export function signInCommand(paths: Paths, provider: SignInProvider, setDefault
   }
 }
 
+/**
+ * The npm package of each provider's plugin. OpenClaw ships `opencode-go` with its own release but installs `opencode`
+ * (Zen) as a separate plugin, so an install without it gets it through `openclaw plugins install` before signing in.
+ */
+export const PROVIDER_PLUGINS: Readonly<Record<SignInProvider, string>> = {
+  opencode: "@openclaw/opencode-provider",
+  "opencode-go": "@openclaw/opencode-go-provider",
+}
+
+/** The `openclaw` arguments that say whether the install has a provider's plugin: they exit 0 when it does. */
+export const pluginInspectCommand = (provider: SignInProvider) => ["plugins", "inspect", provider, "--json"]
+
+/** The `openclaw` arguments that install a provider's plugin, as OpenClaw's own docs name it. */
+export const pluginInstallCommand = (provider: SignInProvider) => ["plugins", "install", PROVIDER_PLUGINS[provider]]
+
 /** The `openclaw` arguments that list this install's saved sign-ins for a provider, as JSON. */
 export const signInListCommand = (provider: SignInProvider) => [
   "models",

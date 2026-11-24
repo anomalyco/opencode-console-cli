@@ -644,7 +644,7 @@ async function setup() {
     )
     process.stdout.write(
       removed
-        ? `Removed OpenCode Console from ${name} and restored its settings. You're still signed in; \`npx @opencode/console logout\` signs out.\n${openclaw ? "OpenClaw keeps its own sign-in to OpenCode Console; `openclaw models auth logout <profile>` signs it out (`openclaw models auth list` names them).\n" : ""}`
+        ? `Removed OpenCode Console from ${name} and restored its settings. You're still signed in; \`npx @opencode/console logout\` signs out.\n${openclaw ? "OpenClaw keeps its own sign-in to OpenCode Console, and any OpenCode provider plugin it installed; `openclaw models auth logout <profile>` signs it out (`openclaw models auth list` names them).\n" : ""}`
         : `${name} wasn't set up with OpenCode Console\n`,
     )
     return 0
@@ -1076,7 +1076,12 @@ async function setupOpenClaw(
   if (failed.length > 0)
     process.stderr.write(
       `\nSign OpenClaw in to OpenCode Console with:\n${failed
-        .map((provider) => `  ${openclawInvocation(OpenClaw.signInCommand(paths, provider, false).args)}`)
+        .flatMap((provider) => [
+          ...(provider === "opencode"
+            ? [`  ${openclawInvocation(OpenClaw.pluginInstallCommand(provider))}   # if it isn't installed`]
+            : []),
+          `  ${openclawInvocation(OpenClaw.signInCommand(paths, provider, false).args)}`,
+        ])
         .join(
           "\n",
         )}\nOpenClaw before 2026.11.7 has no browser sign-in for OpenCode; it takes an API key instead: openclaw models auth paste-api-key --provider ${failed[0]}\n`,
@@ -1115,6 +1120,10 @@ async function signInOpenClaw(paths: OpenClaw.Paths, providers: readonly OpenCla
   })
   if (pending.length === 0 || !process.stdin.isTTY) return pending
   return pending.filter((provider) => {
+    if (runOpenClaw(OpenClaw.pluginInspectCommand(provider), paths, "pipe").status !== 0) {
+      process.stdout.write(`\nInstalling OpenClaw's ${provider} provider plugin…\n`)
+      if (runOpenClaw(OpenClaw.pluginInstallCommand(provider), paths, "inherit").status !== 0) return true
+    }
     process.stdout.write(`\nSigning OpenClaw in to OpenCode Console for ${provider}…\n`)
     const { args } = OpenClaw.signInCommand(paths, provider, !OpenClaw.hasDefaultModel(paths))
     return runOpenClaw(args, paths, "inherit").status !== 0
