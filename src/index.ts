@@ -1079,7 +1079,7 @@ async function setupOpenClaw(
         .map((provider) => `  ${openclawInvocation(OpenClaw.signInCommand(paths, provider, false).args)}`)
         .join(
           "\n",
-        )}\nAn OpenClaw without browser sign-in for OpenCode takes an API key instead: openclaw models auth paste-api-key --provider ${failed[0]}\n`,
+        )}\nOpenClaw before 2026.11.7 has no browser sign-in for OpenCode; it takes an API key instead: openclaw models auth paste-api-key --provider ${failed[0]}\n`,
     )
   process.stdout.write(
     "\nOpenClaw loads plugins when its Gateway starts, so restart a running one with openclaw gateway restart.\n",
@@ -1138,7 +1138,9 @@ function runOpenClaw(args: readonly string[], paths: OpenClaw.Paths, stdio: "pip
   })
 }
 
-const openclawInvocation = (args: readonly string[]) => ["openclaw", ...args].join(" ")
+function openclawInvocation(args: readonly string[]) {
+  return ["openclaw", ...args].join(" ")
+}
 
 // The switch setup flipped governs the member's own hooks as well as setup's, so setup says so.
 function hooksTurnedOn(change: string, file: string) {

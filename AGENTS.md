@@ -1,9 +1,9 @@
 # OpenCode Console CLI
 
-`opencode-console`, published to npm as `@opencode/console`, connects Claude Code, Pi, Codex, DeepSeek Harness and
-Hermes Agent to an OpenCode Console workspace and enforces its policies on their tool calls. It ships as a Node bundle
-(`script/build.ts`) and as eleven signed standalone binaries (`script/compile.ts`). The default branch is `dev`, and
-every push to it publishes a dev build. Beta and stable releases are dispatched from `dev` (`release.yml`).
+`opencode-console`, published to npm as `@opencode/console`, connects Claude Code, Pi, Codex, DeepSeek Harness,
+Hermes Agent and OpenClaw to an OpenCode Console workspace and enforces its policies on their tool calls. It ships as a
+Node bundle (`script/build.ts`) and as eleven signed standalone binaries (`script/compile.ts`). The default branch is
+`dev`, and every push to it publishes a dev build. Beta and stable releases are dispatched from `dev` (`release.yml`).
 
 ## Where things are
 
@@ -15,7 +15,7 @@ every push to it publishes a dev build. Beta and stable releases are dispatched 
 - `src/watches.ts` and `src/*-watches.ts`: event watches for each agent.
 - `src/policy-evaluator.ts`: policy decisions, made by `@opencode/core`'s engine, the same one OpenCode uses.
 - `src/claude-code*.ts`, `src/codex*.ts`, `src/pi*.ts`, `src/deepseek-harness.ts`, `src/dsh-plugin.ts`,
-  `src/hermes*.ts`: each agent's setup, hook or in-process plugin.
+  `src/hermes*.ts`, `src/openclaw*.ts`: each agent's setup, hook or in-process plugin.
 - `src/credentials.ts`, `src/store.ts`: the sign-in and the CLI's data directory.
 - `src/install.ts`, `src/update/`: where setup installs the CLI, self-update, signature checks and rollback.
 - `install`, `install.ps1`: the standalone installers, from `production` on `raw.githubusercontent.com` until Console

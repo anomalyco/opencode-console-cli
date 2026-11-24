@@ -108,8 +108,8 @@ alike. OpenClaw loads plugins when its Gateway starts, so run `openclaw gateway 
 The models come from OpenClaw's own `opencode` (Zen) and `opencode-go` (Go) providers: for each one the workspace
 offers, setup runs `openclaw models auth login --provider <provider> --method oauth`, which shows a code to approve in
 OpenCode Console, and OpenClaw keeps and refreshes that sign-in itself. An install that names no model yet starts new
-sessions on the provider's starter model. Without a terminal, or on an OpenClaw release without OpenCode browser
-sign-in, setup prints the command to run instead, and an API key works too
+sessions on the provider's starter model. Browser sign-in for OpenCode needs OpenClaw 2026.11.7 or later. Without a
+terminal, or on an older OpenClaw, setup prints the command to run instead, and an API key works too
 (`openclaw models auth paste-api-key --provider opencode`). `--remove` leaves OpenClaw's sign-in in place;
 `openclaw models auth logout` signs it out.
 
