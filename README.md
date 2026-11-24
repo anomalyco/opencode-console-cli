@@ -99,7 +99,7 @@ npx @opencode/console setup openclaw
 ```
 
 Setup writes `~/.openclaw/openclaw.json` (or `OPENCLAW_CONFIG_PATH`, `$OPENCLAW_STATE_DIR/openclaw.json`,
-`OPENCLAW_PROFILE`'s, or `--profile <name>`'s at `~/.openclaw-<name>/openclaw.json`), adds the `opencode-console`
+`OPENCLAW_PROFILE`'s, or `--profile <name>`'s, which picks it as `openclaw --profile <name>` does), adds the `opencode-console`
 plugin, MCP servers and skills, and puts any workspace instructions in the default agent's `AGENTS.md`. On a fresh
 install, setup waits for OpenClaw to create `AGENTS.md`, writes the instructions on the first tool call after that, and
 they apply from the next session. Every tool call goes through the workspace's policies, in chat, channels and cron

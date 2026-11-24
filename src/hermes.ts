@@ -4,7 +4,7 @@ import { createHash } from "node:crypto"
 import { rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Exit, Option, Schema } from "effect"
 import { Document, isCollection, isMap, isSeq, parseDocument } from "yaml"
 import { version } from "../package.json" with { type: "json" }
 import { ConsoleClient } from "./console-client"
@@ -55,15 +55,25 @@ export function paths(
       ? path.join(env.LOCALAPPDATA?.trim() || path.join(user, "AppData", "Local"), `hermes${suffix}`)
       : path.join(user, `.hermes${suffix}`)
   const named = env.HERMES_HOME?.trim()
+  const custom = named
+    ? path.resolve(named === "~" ? user : named.startsWith("~/") ? path.join(user, named.slice(2)) : named)
+    : undefined
+  // `hermes --profile <name>` finds profiles under the root HERMES_HOME names: the profile's root when it names one,
+  // else HERMES_HOME itself, a custom deployment's (`profile_root_for_env_home`). `default` is the root.
+  const launch = custom
+    ? path.basename(path.dirname(custom)) === "profiles"
+      ? path.dirname(path.dirname(custom))
+      : custom
+    : root
   const active = ConsoleStore.read(path.join(root, "active_profile"))?.trim()
   const profile = input.profile ?? (named ? undefined : active && active !== "default" ? active : undefined)
   if (profile !== undefined && !PROFILE.test(profile)) throw new Error(`Not a Hermes profile name: ${profile}`)
   const home =
     profile !== undefined
-      ? path.join(root, "profiles", profile)
-      : named
-        ? path.resolve(named === "~" ? user : named.startsWith("~/") ? path.join(user, named.slice(2)) : named)
-        : root
+      ? profile.toLowerCase() === "default"
+        ? launch
+        : path.join(launch, "profiles", profile)
+      : (custom ?? root)
   return {
     home,
     config: path.join(home, "config.yaml"),
@@ -275,38 +285,43 @@ export const refresh = Effect.fn("Hermes.refresh")(function* (
     ? undefined
     : provider(yield* ConsoleClient.fetchModels(credential))
   const skills = WorkspaceSnapshot.skills(snapshot)
-  const applied: Applied[] = []
-  for (const { base, previous } of targets) {
-    const directory = skillsDirectory(store, base.paths.home)
-    const bundles = yield* Skill.fetchChanged(credential, directory, skills, previous?.skills ?? {})
-    const keepProvider = keep(previous)
-    const models = keepProvider
-      ? undefined
-      : (fetched ?? (previous?.providers === fingerprint ? (previous.models ?? undefined) : undefined))
-    applied.push(
-      yield* ConsoleStore.locked(
-        store,
-        Effect.sync(() =>
-          apply(store, {
-            paths: base.paths,
-            command: base.command,
-            environment: base.environment,
-            harness: setup?.harness ?? (harness?.startsWith("HermesAgent/") ? harness : previous?.harness),
-            models,
-            servers: WorkspaceSnapshot.servers(snapshot),
-            instructions: WorkspaceSnapshot.instructions(snapshot),
-            skills,
-            bundles,
-            directory,
-            providers: fingerprint,
-            keepProvider,
-            explicit: setup !== undefined,
-          }),
-        ),
-      ),
-    )
-  }
-  return applied[0]
+  // A profile setup can't update, such as one whose config.yaml it can't read, leaves the rest to update; the first
+  // failure is still the sync's.
+  const applied = yield* Effect.forEach(targets, ({ base, previous }) =>
+    Effect.exit(
+      Effect.gen(function* () {
+        const directory = skillsDirectory(store, base.paths.home)
+        const bundles = yield* Skill.fetchChanged(credential, directory, skills, previous?.skills ?? {})
+        const keepProvider = keep(previous)
+        const models = keepProvider
+          ? undefined
+          : (fetched ?? (previous?.providers === fingerprint ? (previous.models ?? undefined) : undefined))
+        return yield* ConsoleStore.locked(
+          store,
+          Effect.sync(() =>
+            apply(store, {
+              paths: base.paths,
+              command: base.command,
+              environment: base.environment,
+              harness: setup?.harness ?? (harness?.startsWith("HermesAgent/") ? harness : previous?.harness),
+              models,
+              servers: WorkspaceSnapshot.servers(snapshot),
+              instructions: WorkspaceSnapshot.instructions(snapshot),
+              skills,
+              bundles,
+              directory,
+              providers: fingerprint,
+              keepProvider,
+              explicit: setup !== undefined,
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+  const failed = applied.find(Exit.isFailure)
+  if (failed) return yield* Effect.failCause(failed.cause)
+  return applied.flatMap((exit) => (Exit.isSuccess(exit) ? [exit.value] : []))[0]
 })
 
 /**
@@ -361,10 +376,12 @@ interface Desired {
   readonly explicit: boolean
 }
 
-function apply(store: ConsoleStore.Info, desired: Desired): Applied {
+function apply(store: ConsoleStore.Info, desired: Desired): Applied | undefined {
   // Everything is read before anything is written, so a file setup can't read leaves every file as it was.
   const recorded = manifest(store)
   const previous = recorded?.profiles[desired.paths.home]
+  // A sync that started before `--remove` took the profile out leaves it out.
+  if (!previous && !desired.explicit) return undefined
   const config = readConfig(desired.paths.config)
   const soul = ConsoleStore.read(desired.paths.soul)
   const document = config.document
@@ -649,10 +666,11 @@ def _ask(event, timeout):
         )
     except Exception as error:
         return f"{BLOCKED}: {error}", None
+    # The CLI answers every hook with a JSON object, so anything else, even with exit code 0, blocks.
     try:
-        answer = json.loads(done.stdout or "{}")
+        answer = json.loads(done.stdout)
     except ValueError:
-        answer = {}
+        answer = None
     if done.returncode == 0 and isinstance(answer, dict) and answer.get("action") != "block":
         return None, answer
     message = answer.get("message") if isinstance(answer, dict) else None

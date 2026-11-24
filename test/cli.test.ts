@@ -1273,6 +1273,20 @@ describe("setup openclaw", () => {
     expect(setup.stdout).toContain("restart a running one with openclaw --profile work gateway restart.")
   })
 
+  test("says OpenClaw's Gateway goes unchecked without OPENCODE_API_KEY when setup used only the key", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json({ policies }), models })
+    const env = { ...isolated(root), OPENCODE_CONSOLE_SERVER: console.url }
+
+    const keyOnly = await cli(root, ["setup", "openclaw"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+    await cli(root, ["login", "--server", console.url], { env })
+    const signedIn = await cli(root, ["setup", "openclaw"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+
+    expect(keyOnly.code).toBe(0)
+    expect(keyOnly.stderr).toContain("its tool calls go unchecked")
+    expect(signedIn.stderr).not.toContain("its tool calls go unchecked")
+  })
+
   test("asks OpenClaw which sign-ins it holds, for the install setup connected, and names only the missing one", async () => {
     const { root } = home()
     const console = serve({ config: () => Response.json({ policies }), models })
@@ -1383,6 +1397,46 @@ describe("setup hermes", () => {
       ])
     },
   )
+
+  test.skipIf(!python)(
+    "writes a plugin that blocks a tool call the CLI answers with exit code 0 but nothing else",
+    async () => {
+      const { root } = home()
+      const console = serve({ config: () => Response.json(workspace), models })
+      const env = isolated(root)
+      await cli(root, ["login", "--server", console.url], { env })
+      await cli(root, ["setup", "hermes"], { env })
+      const plugin = path.join(hermesOf(root), "plugins", "opencode-console", "__init__.py")
+      writeFileSync(
+        plugin,
+        readFileSync(plugin, "utf8").replace(/^COMMAND = .*$/m, `COMMAND = ${JSON.stringify([Bun.which("true")])}`),
+      )
+
+      const result = await callPlugin(
+        root,
+        env,
+        'plugin.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})',
+      )
+
+      expect(JSON.parse(result.stdout)).toEqual([
+        { action: "block", message: "opencode-console couldn't check this, so it was blocked" },
+      ])
+    },
+  )
+
+  test("says Hermes's gateway goes unchecked without OPENCODE_API_KEY when setup used only the key", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json(workspace), models })
+    const env = { ...isolated(root), OPENCODE_CONSOLE_SERVER: console.url }
+
+    const keyOnly = await cli(root, ["setup", "hermes"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+    await cli(root, ["login", "--server", console.url], { env })
+    const signedIn = await cli(root, ["setup", "hermes"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+
+    expect(keyOnly.code).toBe(0)
+    expect(keyOnly.stderr).toContain("their tool calls go unchecked")
+    expect(signedIn.stderr).not.toContain("their tool calls go unchecked")
+  })
 
   test.skipIf(!python)("writes a plugin that blocks every tool call when the CLI can't answer", async () => {
     const { root } = home()

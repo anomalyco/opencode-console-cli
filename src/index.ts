@@ -1012,6 +1012,10 @@ async function setupHermes(
     process.stderr.write(
       `\nKept your own ${applied.skipped.join(", ")}, so the workspace's of the same name weren't added.\n`,
     )
+  if (await keyOnly(store))
+    process.stderr.write(
+      "\nSetup used OPENCODE_API_KEY. Hermes's gateway and cron get it only from their own environment; started without it, they have no workspace models or MCP servers, and their tool calls go unchecked. Run `npx @opencode/console login` so they use your sign-in instead.\n",
+    )
   if (!agent) process.stderr.write("\nHermes Agent isn't on your PATH yet; this applies once it's installed.\n")
   process.stdout.write(
     "\nRun hermes to start. Hermes loads plugins when its gateway starts, so restart a running one with hermes gateway restart.\n",
@@ -1077,6 +1081,10 @@ async function setupOpenClaw(
   if (applied.waiting)
     process.stderr.write(
       `\nThe workspace's instructions go in ${applied.agents}, which OpenClaw creates when it first runs; they're added on the next sync after that.\n`,
+    )
+  if (await keyOnly(store))
+    process.stderr.write(
+      "\nSetup used OPENCODE_API_KEY. OpenClaw's Gateway gets it only from its own environment, often a service's; started without it, it has no workspace MCP servers, and its tool calls go unchecked. Run `npx @opencode/console login` so it uses your sign-in instead.\n",
     )
   const failed = agent ? await signInOpenClaw(paths, providers) : providers
   if (!agent) process.stderr.write("\nOpenClaw isn't on your PATH yet; this applies once it's installed.\n")
@@ -1158,6 +1166,13 @@ function runOpenClaw(args: readonly string[], paths: OpenClaw.Paths, stdio: "pip
 
 function openclawInvocation(args: readonly string[]) {
   return ["openclaw", ...args].join(" ")
+}
+
+// Setup signed in with OPENCODE_API_KEY alone, which an agent's own background processes see only if they're given it.
+async function keyOnly(store: ConsoleStore.Info) {
+  if (!process.env.OPENCODE_API_KEY) return false
+  const { ConsoleCredentials } = await import("./credentials")
+  return ConsoleCredentials.stored(store) === undefined
 }
 
 // The switch setup flipped governs the member's own hooks as well as setup's, so setup says so.

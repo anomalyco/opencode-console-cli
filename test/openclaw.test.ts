@@ -425,6 +425,51 @@ test("updates every install setup connected on sync, and --remove takes out only
   expect(Object.keys(OpenClaw.manifest(openclaw.store)?.profiles ?? {})).toEqual([openclaw.paths.config])
 })
 
+test("updates the other installs on sync when one's openclaw.json can't be read, and still fails the sync", async () => {
+  const openclaw = member({ instructions: [{ name: "Style", content: "Use tabs." }] })
+  const work = OpenClaw.paths({ profile: "work", env: {}, home: openclaw.home })
+  const agents = path.join(work.workspace, "AGENTS.md")
+  write(agents, "Work.\n")
+  await openclaw.run()
+  await openclaw.setup(work)
+  write(openclaw.paths.config, "{ unquoted: 1 }\n")
+  write(agents, "Work.\n")
+
+  await expect(openclaw.sync()).rejects.toThrow("isn't JSON setup can edit")
+
+  expect(read(agents)).toContain("Use tabs.")
+})
+
+test("leaves out an install --remove took out while a sync was fetching its skills", async () => {
+  const skills: unknown[] = []
+  const removing = { during: () => {} }
+  const openclaw = member({
+    skills,
+    bundles: {
+      get deploy() {
+        removing.during()
+        return {
+          format: 2,
+          slug: "deploy",
+          version: "v1",
+          files: [{ path: "SKILL.md", kind: "text", content: "---\ntitle: Deploy\n---\nShip it." }],
+        }
+      },
+    },
+  })
+  await openclaw.run()
+  skills.push({ slug: "deploy", version: "v1" })
+  removing.during = () => {
+    removing.during = () => {}
+    openclaw.remove()
+  }
+
+  await openclaw.sync()
+
+  expect(existsSync(openclaw.paths.config)).toBe(false)
+  expect(existsSync(OpenClaw.manifestFile(openclaw.store))).toBe(false)
+})
+
 test("waits for OpenClaw to create AGENTS.md before adding instructions, so OpenClaw's own template isn't skipped", async () => {
   const openclaw = member({ instructions: [{ name: "Style", content: "Use tabs." }] })
   const agents = path.join(openclaw.paths.workspace, "AGENTS.md")
@@ -438,7 +483,7 @@ test("waits for OpenClaw to create AGENTS.md before adding instructions, so Open
   expect(read(agents)).toStartWith("OpenClaw's template.\n\n<!-- opencode-console:start -->")
 })
 
-test("finds the install OpenClaw would use: --profile, else OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH, else OPENCLAW_PROFILE, else ~/.openclaw", () => {
+test("finds the install OpenClaw would use: --profile, which keeps a custom state directory, else OPENCLAW_STATE_DIR and OPENCLAW_CONFIG_PATH, else OPENCLAW_PROFILE, else ~/.openclaw", () => {
   const home = "/home/ada"
   const resolve = (input: Parameters<typeof OpenClaw.paths>[0]) => OpenClaw.paths({ home, env: {}, ...input })
 
@@ -447,7 +492,21 @@ test("finds the install OpenClaw would use: --profile, else OPENCLAW_STATE_DIR a
     config: "/home/ada/.openclaw-bot/openclaw.json",
     workspace: "/home/ada/.openclaw-bot/workspace",
   })
-  expect(resolve({ profile: "bot", env: { OPENCLAW_STATE_DIR: "/srv/x" } }).state).toBe("/home/ada/.openclaw-bot")
+  expect(resolve({ profile: "bot", env: { OPENCLAW_STATE_DIR: "/srv/x" } })).toEqual({
+    state: "/srv/x",
+    config: "/srv/x/openclaw.json",
+    workspace: "/srv/x/workspace",
+  })
+  // A service's paths are the profile it runs, which --profile switches from.
+  expect(
+    resolve({
+      profile: "bot",
+      env: { OPENCLAW_STATE_DIR: "/home/ada/.openclaw", OPENCLAW_CONFIG_PATH: "/home/ada/.openclaw/openclaw.json" },
+    }).config,
+  ).toBe("/home/ada/.openclaw-bot/openclaw.json")
+  expect(resolve({ profile: "bot", env: { OPENCLAW_CONFIG_PATH: "/etc/openclaw.json" } }).config).toBe(
+    "/etc/openclaw.json",
+  )
   expect(resolve({ env: { OPENCLAW_STATE_DIR: "~/state", OPENCLAW_CONFIG_PATH: "/etc/openclaw.json" } })).toEqual({
     state: "/home/ada/state",
     config: "/etc/openclaw.json",
@@ -518,6 +577,18 @@ test("blocks a tool call the CLI denies, and one it can't get an answer for", as
   expect(denied.log()).toContain("--harness openclaw/2026.11.5 hook openclaw")
   expect(denied.log()).toContain('"tool_name":"exec","tool_input":{"command":"rm -rf /"}')
   expect(denied.log()).toContain('"cwd":"/work/app"')
+})
+
+test("blocks a tool call the CLI answers with exit code 0 but no answer it can read", async () => {
+  const silent = await plugin({ hook: "" })
+  const listed = await plugin({ hook: "[]" })
+
+  const call = { toolName: "exec", params: { command: "ls" } }
+  expect(await silent.hooks.before_tool_call!(call, {})).toEqual({
+    block: true,
+    blockReason: "opencode-console couldn't check this, so it was blocked",
+  })
+  expect(await listed.hooks.before_tool_call!(call, {})).toMatchObject({ block: true })
 })
 
 test("lets an allowed tool call through and serves gateway MCP bearers from memory, without model credentials", async () => {

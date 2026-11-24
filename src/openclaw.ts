@@ -4,7 +4,7 @@ import { createHash } from "node:crypto"
 import { rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Exit, Option, Schema } from "effect"
 // The ESM build: the package's main is a UMD build whose lazy requires Bun's bundler can't follow into the npm bundle.
 import {
   applyEdits,
@@ -61,23 +61,31 @@ export function paths(
     throw new Error(`Not an OpenClaw profile name: ${input.profile}`)
   const named = (profile: string | undefined) =>
     profile === undefined || profile.toLowerCase() === "default" ? undefined : profile
-  if (input.profile !== undefined) {
-    const profile = named(input.profile)
-    const state = profile ? path.join(user, `.openclaw-${profile}`) : path.join(user, ".openclaw")
-    return { state, config: path.join(state, "openclaw.json"), workspace: path.join(state, "workspace") }
-  }
+  const profileState = (profile: string | undefined) =>
+    profile && PROFILE.test(profile) ? path.join(user, `.openclaw-${profile}`) : path.join(user, ".openclaw")
   const inherited = named(env.OPENCLAW_PROFILE?.trim() || undefined)
   const override = env.OPENCLAW_STATE_DIR?.trim()
-  const state = override
-    ? resolve(override)
-    : inherited && PROFILE.test(inherited)
-      ? path.join(user, `.openclaw-${inherited}`)
-      : path.join(user, ".openclaw")
-  const config = env.OPENCLAW_CONFIG_PATH?.trim()
   const workspace = env.OPENCLAW_WORKSPACE_DIR?.trim()
+  const configured = env.OPENCLAW_CONFIG_PATH?.trim()
+  if (input.profile !== undefined) {
+    // As `openclaw --profile <name>` switches (`applyCliProfileEnv`): a state directory or config that is the inherited
+    // profile's own moves to the named one, and one set anywhere else, a custom deployment's, stays.
+    const from = profileState(inherited)
+    const to = profileState(named(input.profile))
+    const moves = override !== undefined && override !== "" && from !== to && resolve(override) === from
+    const state = override && !moves ? resolve(override) : to
+    const replaces =
+      from !== to && (!override || moves) && configured && resolve(configured) === path.join(from, "openclaw.json")
+    return {
+      state,
+      config: configured && !replaces ? resolve(configured) : path.join(state, "openclaw.json"),
+      workspace: workspace ? resolve(workspace) : path.join(state, "workspace"),
+    }
+  }
+  const state = override ? resolve(override) : profileState(inherited)
   return {
     state,
-    config: config ? resolve(config) : path.join(state, "openclaw.json"),
+    config: configured ? resolve(configured) : path.join(state, "openclaw.json"),
     workspace: workspace ? resolve(workspace) : path.join(state, "workspace"),
   }
 }
@@ -311,28 +319,34 @@ export const refresh = Effect.fn("OpenClaw.refresh")(function* (
   const snapshot = credential && WorkspaceSync.current(store, ConsoleCredentials.owner(credential))
   if (!credential || !snapshot?.config) return undefined
   const skills = WorkspaceSnapshot.skills(snapshot)
-  const applied: Applied[] = []
-  for (const { base, previous } of targets) {
-    const folder = skillsDirectory(store, base.paths.config)
-    const bundles = yield* Skill.fetchChanged(credential, folder, skills, previous?.skills ?? {})
-    applied.push(
-      yield* ConsoleStore.locked(
-        store,
-        Effect.sync(() =>
-          apply(store, {
-            paths: base.paths,
-            command: base.command,
-            environment: base.environment,
-            servers: WorkspaceSnapshot.servers(snapshot),
-            instructions: WorkspaceSnapshot.instructions(snapshot),
-            skills,
-            bundles,
-          }),
-        ),
-      ),
-    )
-  }
-  return applied[0]
+  // An install setup can't update, such as one whose openclaw.json it can't read, leaves the rest to update; the first
+  // failure is still the sync's.
+  const applied = yield* Effect.forEach(targets, ({ base, previous }) =>
+    Effect.exit(
+      Effect.gen(function* () {
+        const folder = skillsDirectory(store, base.paths.config)
+        const bundles = yield* Skill.fetchChanged(credential, folder, skills, previous?.skills ?? {})
+        return yield* ConsoleStore.locked(
+          store,
+          Effect.sync(() =>
+            apply(store, {
+              paths: base.paths,
+              command: base.command,
+              environment: base.environment,
+              servers: WorkspaceSnapshot.servers(snapshot),
+              instructions: WorkspaceSnapshot.instructions(snapshot),
+              skills,
+              bundles,
+              explicit: setup !== undefined,
+            }),
+          ),
+        )
+      }),
+    ),
+  )
+  const failed = applied.find(Exit.isFailure)
+  if (failed) return yield* Effect.failCause(failed.cause)
+  return applied.flatMap((exit) => (Exit.isSuccess(exit) ? [exit.value] : []))[0]
 })
 
 /**
@@ -379,12 +393,16 @@ interface Desired {
   readonly instructions: readonly Instruction.Info[]
   readonly skills: readonly Skill.Info[]
   readonly bundles: readonly Skill.Bundle[]
+  /** Setup run by the member; a background sync only updates an install setup still records. */
+  readonly explicit: boolean
 }
 
-function apply(store: ConsoleStore.Info, desired: Desired): Applied {
+function apply(store: ConsoleStore.Info, desired: Desired): Applied | undefined {
   // Everything is read before anything is written, so a file setup can't read leaves every file as it was.
   const recorded = manifest(store)
   const previous = recorded?.profiles[desired.paths.config]
+  // A sync that started before `--remove` took the install out leaves it out.
+  if (!previous && !desired.explicit) return undefined
   const config = readConfig(desired.paths.config)
   const current = config.value
   const edit = editor(config.text ?? "")
@@ -629,11 +647,21 @@ function mcpProfile(name, value) {
   };
 }
 
+// The CLI answers every hook with a JSON object, so anything else, even with exit code 0, blocks.
+function answerOf(text) {
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value === "object" && !Array.isArray(value) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function block(done) {
-  const answer = json(done.stdout);
-  if (done.code === 0 && answer.action !== "block") return undefined;
+  const answer = answerOf(done.stdout);
+  if (done.code === 0 && answer && answer.action !== "block") return undefined;
   const message =
-    (typeof answer.message === "string" && answer.message) ||
+    (answer && typeof answer.message === "string" && answer.message) ||
     (done.stderr || "").trim() ||
     (done.failure ? BLOCKED + ": " + done.failure : BLOCKED);
   return { block: true, blockReason: message };
