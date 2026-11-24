@@ -537,6 +537,30 @@ test("Claude Code's PostToolUse hook watches the branch a Bash git push updated,
   ])
 })
 
+test("Claude Code's PostToolUse hook watches the comments on the artifact a Bash artifact share shared", async () => {
+  const { root } = home()
+  const { console } = watchingConsole(root)
+  const share = claudeHook("PostToolUse", {
+    tool_name: "Bash",
+    tool_input: { command: "npx @opencode/console artifact share ./out --name launch-plan" },
+    tool_response: { stdout: "Shared launch-plan: https://console.test/wrk_test/artifacts/launch-plan\n", stderr: "" },
+  })
+
+  const hook = await cli(root, ["hook", "claude-code"], { stdin: share })
+
+  expect([hook.code, console.state.created]).toEqual([
+    0,
+    [
+      {
+        sessionID: "ses_claude",
+        server: "artifacts",
+        event: "artifact.comment",
+        arguments: { artifact: "launch-plan" },
+      },
+    ],
+  ])
+})
+
 test("Claude Code's PostToolUse hook tells Claude why Console refused to watch the branch a git push updated", async () => {
   const { root } = home()
   watchingConsole(root, {
@@ -1206,6 +1230,89 @@ describe("setup deepseek-harness", () => {
   })
 })
 
+describe("setup openclaw", () => {
+  const models = () =>
+    Response.json({
+      opencode: { name: "Acme / OpenCode", models: { "claude-sonnet-4-6": { name: "Claude Sonnet 4.6" } } },
+      "opencode-go": { name: "Acme / OpenCode Go", models: { "kimi-k3": { name: "Kimi K3" } } },
+    })
+  const isolated = (root: string, bin = "") => ({
+    HOME: path.join(root, "home"),
+    PATH: `${bin ? `${bin}:` : ""}/usr/bin:/bin`,
+    OPENCLAW_STATE_DIR: path.join(root, "home", ".openclaw"),
+  })
+
+  test("names OpenClaw's own sign-in for each of the workspace's catalogs when OpenClaw isn't on PATH", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json({ policies }), models })
+    const env = isolated(root)
+    await cli(root, ["login", "--server", console.url], { env })
+
+    const setup = await cli(root, ["setup", "openclaw"], { env })
+
+    expect(setup.code).toBe(0)
+    expect(setup.stderr).toContain("openclaw models auth login --provider opencode --method oauth")
+    expect(setup.stderr).toContain("openclaw models auth login --provider opencode-go --method oauth")
+    expect(setup.stderr).toContain("openclaw plugins install @openclaw/opencode-provider")
+  })
+
+  test("names the install by its profile in the commands it prints, and sets a starter model where none is named", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json({ policies }), models })
+    const env = { HOME: path.join(root, "home"), PATH: "/usr/bin:/bin" }
+    await cli(root, ["login", "--server", console.url], { env })
+
+    const setup = await cli(root, ["setup", "openclaw", "--profile", "work"], { env })
+
+    expect(setup.code).toBe(0)
+    expect(setup.stderr).toContain("openclaw --profile work plugins install @openclaw/opencode-provider")
+    expect(setup.stderr).toContain(
+      "openclaw --profile work models auth login --provider opencode --method oauth --set-default\n",
+    )
+    expect(setup.stderr).toContain("openclaw --profile work models auth login --provider opencode-go --method oauth\n")
+    expect(setup.stdout).toContain("restart a running one with openclaw --profile work gateway restart.")
+  })
+
+  test("says OpenClaw's Gateway goes unchecked without OPENCODE_API_KEY when setup used only the key", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json({ policies }), models })
+    const env = { ...isolated(root), OPENCODE_CONSOLE_SERVER: console.url }
+
+    const keyOnly = await cli(root, ["setup", "openclaw"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+    await cli(root, ["login", "--server", console.url], { env })
+    const signedIn = await cli(root, ["setup", "openclaw"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+
+    expect(keyOnly.code).toBe(0)
+    expect(keyOnly.stderr).toContain("its tool calls go unchecked")
+    expect(signedIn.stderr).not.toContain("its tool calls go unchecked")
+  })
+
+  test("asks OpenClaw which sign-ins it holds, for the install setup connected, and names only the missing one", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json({ policies }), models })
+    const bin = path.join(root, "bin")
+    mkdirSync(bin, { recursive: true })
+    const log = path.join(root, "openclaw.log")
+    // Stands in for OpenClaw: signed in to Zen only, and records each call with the install it was pointed at.
+    writeFileSync(
+      path.join(bin, "openclaw"),
+      `#!/bin/sh\necho "$OPENCLAW_STATE_DIR $*" >> ${JSON.stringify(log)}\ncase "$*" in\n  *"--version"*) echo "OpenClaw 2026.11.7" ;;\n  *"auth list --provider opencode --json"*) echo '{"profiles":[{"id":"opencode:default"}]}' ;;\n  *"auth list"*) echo '{"profiles":[]}' ;;\nesac\n`,
+      { mode: 0o755 },
+    )
+    const env = isolated(root, bin)
+    await cli(root, ["login", "--server", console.url], { env })
+
+    const setup = await cli(root, ["setup", "openclaw"], { env })
+
+    expect(setup.code).toBe(0)
+    expect(setup.stderr).toContain("openclaw models auth login --provider opencode-go --method oauth")
+    expect(setup.stderr).not.toContain("--provider opencode --method")
+    expect(readFileSync(log, "utf8")).toContain(
+      `${env.OPENCLAW_STATE_DIR} models auth list --provider opencode-go --json`,
+    )
+  })
+})
+
 describe("setup hermes", () => {
   const models = () =>
     Response.json({
@@ -1290,6 +1397,46 @@ describe("setup hermes", () => {
       ])
     },
   )
+
+  test.skipIf(!python)(
+    "writes a plugin that blocks a tool call the CLI answers with exit code 0 but nothing else",
+    async () => {
+      const { root } = home()
+      const console = serve({ config: () => Response.json(workspace), models })
+      const env = isolated(root)
+      await cli(root, ["login", "--server", console.url], { env })
+      await cli(root, ["setup", "hermes"], { env })
+      const plugin = path.join(hermesOf(root), "plugins", "opencode-console", "__init__.py")
+      writeFileSync(
+        plugin,
+        readFileSync(plugin, "utf8").replace(/^COMMAND = .*$/m, `COMMAND = ${JSON.stringify([Bun.which("true")])}`),
+      )
+
+      const result = await callPlugin(
+        root,
+        env,
+        'plugin.on_pre_tool_call(tool_name="terminal", args={"command": "ls"})',
+      )
+
+      expect(JSON.parse(result.stdout)).toEqual([
+        { action: "block", message: "opencode-console couldn't check this, so it was blocked" },
+      ])
+    },
+  )
+
+  test("says Hermes's gateway goes unchecked without OPENCODE_API_KEY when setup used only the key", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json(workspace), models })
+    const env = { ...isolated(root), OPENCODE_CONSOLE_SERVER: console.url }
+
+    const keyOnly = await cli(root, ["setup", "hermes"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+    await cli(root, ["login", "--server", console.url], { env })
+    const signedIn = await cli(root, ["setup", "hermes"], { env: { ...env, OPENCODE_API_KEY: "oc_sk_ci" } })
+
+    expect(keyOnly.code).toBe(0)
+    expect(keyOnly.stderr).toContain("their tool calls go unchecked")
+    expect(signedIn.stderr).not.toContain("their tool calls go unchecked")
+  })
 
   test.skipIf(!python)("writes a plugin that blocks every tool call when the CLI can't answer", async () => {
     const { root } = home()

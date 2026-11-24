@@ -41,6 +41,8 @@ export async function problems() {
     ["codex", () => import("./codex")],
     ["hermes-hook", () => import("./hermes-hook")],
     ["hermes", () => import("./hermes")],
+    ["openclaw-hook", () => import("./openclaw-hook")],
+    ["openclaw", () => import("./openclaw")],
     ["pi", () => import("./pi")],
     ["deepseek-harness", () => import("./deepseek-harness")],
   ]

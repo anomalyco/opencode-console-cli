@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # A smoke test against a real Console, opt-in and never run in CI: signs in with the caller's OPENCODE_API_KEY (a
-# service account key for a test workspace) and runs `sync`, `status --json`, `token` and a policy `check` from source.
+# service account key for a test workspace) and runs `sync`, `status --json`, `token`, a policy `check` and
+# `setup openclaw` from source.
 # OPENCODE_CONSOLE_SERVER picks the Console (https://opencode.ai/console by default). HOME is a temporary directory,
 # so nothing touches your own sign-in or agent configs. From the repository root:
 #   OPENCODE_API_KEY=... bash script/e2e/live-smoke.sh
@@ -20,3 +21,23 @@ echo "✓ token prints an access token"
 decision=$(echo '{"action":"read","resources":["README.md"]}' | cli check) || [ $? -eq 2 ]
 echo "$decision" | jq -e '.effect == "allow" or .effect == "deny"' > /dev/null
 echo "✓ check decided a tool call: $decision"
+
+# OpenClaw: setup loads its plugin into a scratch install and leaves the models to OpenClaw's own sign-in, which
+# needs a person to approve it, so with no terminal it prints the command. `hook openclaw` decides a tool call the way
+# setup's plugin asks it to. OpenClaw needn't be installed; setup says so and still writes its config. Every
+# OPENCLAW_* variable is dropped first, so a shell inside a running Gateway can't point setup at that Gateway's config.
+for name in $(env | sed -n 's/^\(OPENCLAW_[A-Z0-9_]*\)=.*/\1/p'); do unset "$name"; done
+export OPENCLAW_STATE_DIR=$home/openclaw
+cli setup openclaw < /dev/null > /dev/null 2> "$home/openclaw-setup.err"
+jq -e '.plugins.entries["opencode-console"].enabled == true and .models == null' "$OPENCLAW_STATE_DIR/openclaw.json" > /dev/null
+echo "✓ setup openclaw loaded its plugin and wrote no model provider"
+grep -q 'models auth login --provider opencode' "$home/openclaw-setup.err"
+echo "✓ setup openclaw named OpenClaw's own sign-in for the workspace's models"
+if grep -q 'oc_sk_\|ocgw_' "$OPENCLAW_STATE_DIR/openclaw.json"; then echo "✗ openclaw.json holds a key or token" >&2; exit 1; fi
+echo "✓ openclaw.json holds no key or gateway token"
+answer=$(echo '{"hook_event_name":"before_tool_call","tool_name":"read","tool_input":{"path":"README.md"},"cwd":"'"$PWD"'"}' | cli hook openclaw) || [ $? -eq 2 ]
+echo "$answer" | jq -e 'type == "object"' > /dev/null
+echo "✓ hook openclaw decided a tool call: $answer"
+cli setup openclaw --remove > /dev/null
+[ ! -e "$OPENCLAW_STATE_DIR/openclaw.json" ]
+echo "✓ setup openclaw --remove took out the openclaw.json it created"

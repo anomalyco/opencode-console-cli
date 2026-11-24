@@ -355,6 +355,49 @@ test("updates every profile setup connected on sync, and --remove takes out only
   expect(Object.keys(Hermes.manifest(hermes.store)?.profiles ?? {})).toEqual([hermes.paths.home])
 })
 
+test("updates the other profiles on sync when one's config.yaml can't be read, and still fails the sync", async () => {
+  const hermes = member({ instructions: [{ name: "Style", content: "Use tabs." }] })
+  const work = Hermes.paths({ profile: "work", env: {}, home: hermes.home, platform: "linux" })
+  await hermes.run()
+  await hermes.setup(work)
+  write(hermes.paths.config, "model: [unclosed\n")
+  rmSync(work.soul)
+
+  await expect(hermes.sync()).rejects.toThrow(hermes.paths.config)
+
+  expect(read(work.soul)).toContain("Use tabs.")
+})
+
+test("leaves out a profile --remove took out while a sync was fetching its skills", async () => {
+  const skills: unknown[] = []
+  const removing = { during: () => {} }
+  const hermes = member({
+    skills,
+    bundles: {
+      get deploy() {
+        removing.during()
+        return {
+          format: 2,
+          slug: "deploy",
+          version: "v1",
+          files: [{ path: "SKILL.md", kind: "text", content: "---\ntitle: Deploy\n---\nShip it." }],
+        }
+      },
+    },
+  })
+  await hermes.run()
+  skills.push({ slug: "deploy", version: "v1" })
+  removing.during = () => {
+    removing.during = () => {}
+    hermes.remove()
+  }
+
+  await hermes.sync()
+
+  expect(existsSync(hermes.paths.config)).toBe(false)
+  expect(existsSync(Hermes.manifestFile(hermes.store))).toBe(false)
+})
+
 test("finds the profile Hermes would use: --profile, else HERMES_HOME, else the active profile, else ~/.hermes", () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "opencode-console-hermes-paths-"))
   homes.push(home)
@@ -363,6 +406,10 @@ test("finds the profile Hermes would use: --profile, else HERMES_HOME, else the 
     Hermes.paths({ home, platform: "linux", env: {}, ...input }).home
 
   expect(resolve({ profile: "bot" })).toBe(path.join(home, ".hermes", "profiles", "bot"))
+  // As `hermes --profile`: profiles live under the root HERMES_HOME names, a custom deployment's or a profile's root.
+  expect(resolve({ profile: "bot", env: { HERMES_HOME: "/opt/data" } })).toBe("/opt/data/profiles/bot")
+  expect(resolve({ profile: "bot", env: { HERMES_HOME: "/opt/data/profiles/work" } })).toBe("/opt/data/profiles/bot")
+  expect(resolve({ profile: "default", env: { HERMES_HOME: "/opt/data" } })).toBe("/opt/data")
   expect(resolve({ env: { HERMES_HOME: "~/elsewhere" } })).toBe(path.join(home, "elsewhere"))
   expect(resolve({})).toBe(path.join(home, ".hermes", "profiles", "work"))
   expect(Hermes.paths({ home: "/nowhere", platform: "linux", env: {} }).home).toBe("/nowhere/.hermes")

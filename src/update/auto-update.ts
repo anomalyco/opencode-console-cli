@@ -223,16 +223,19 @@ async function rollback(
  * crash any build the same way, so they don't.
  */
 export async function buildFault(error: unknown) {
-  const [{ ClaudeCodeHook }, { CodexHook }, { HermesHook }, { ConsoleCredentials }] = await Promise.all([
-    import("../claude-code-hook"),
-    import("../codex-hook"),
-    import("../hermes-hook"),
-    import("../credentials"),
-  ])
+  const [{ ClaudeCodeHook }, { CodexHook }, { HermesHook }, { OpenClawHook }, { ConsoleCredentials }] =
+    await Promise.all([
+      import("../claude-code-hook"),
+      import("../codex-hook"),
+      import("../hermes-hook"),
+      import("../openclaw-hook"),
+      import("../credentials"),
+    ])
   return !(
     error instanceof ClaudeCodeHook.Unreadable ||
     error instanceof CodexHook.Unreadable ||
     error instanceof HermesHook.Unreadable ||
+    error instanceof OpenClawHook.Unreadable ||
     error instanceof ConsoleCredentials.Unusable ||
     (error instanceof Error && "code" in error && typeof error.code === "string")
   )
