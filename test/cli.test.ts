@@ -1256,6 +1256,23 @@ describe("setup openclaw", () => {
     expect(setup.stderr).toContain("openclaw plugins install @openclaw/opencode-provider")
   })
 
+  test("names the install by its profile in the commands it prints, and sets a starter model where none is named", async () => {
+    const { root } = home()
+    const console = serve({ config: () => Response.json({ policies }), models })
+    const env = { HOME: path.join(root, "home"), PATH: "/usr/bin:/bin" }
+    await cli(root, ["login", "--server", console.url], { env })
+
+    const setup = await cli(root, ["setup", "openclaw", "--profile", "work"], { env })
+
+    expect(setup.code).toBe(0)
+    expect(setup.stderr).toContain("openclaw --profile work plugins install @openclaw/opencode-provider")
+    expect(setup.stderr).toContain(
+      "openclaw --profile work models auth login --provider opencode --method oauth --set-default\n",
+    )
+    expect(setup.stderr).toContain("openclaw --profile work models auth login --provider opencode-go --method oauth\n")
+    expect(setup.stdout).toContain("restart a running one with openclaw --profile work gateway restart.")
+  })
+
   test("asks OpenClaw which sign-ins it holds, for the install setup connected, and names only the missing one", async () => {
     const { root } = home()
     const console = serve({ config: () => Response.json({ policies }), models })

@@ -1040,7 +1040,14 @@ async function setupOpenClaw(
       process.env[key] ? [[key, process.env[key]]] : [],
     ),
   )
-  const paths = OpenClaw.paths({ profile: flag("profile") })
+  const profile = flag("profile")
+  const paths = OpenClaw.paths({ profile })
+  // The commands setup prints name the install as `openclaw --profile <name>` would; the ones it runs get its paths.
+  const printed = (args: readonly string[]) =>
+    openclawInvocation([
+      ...(profile === undefined || profile.toLowerCase() === "default" ? [] : ["--profile", profile]),
+      ...args,
+    ])
   const applied = await withConsole(OpenClaw.refresh(store, { paths, command, environment }))
   if (!applied) {
     process.stderr.write("Couldn't read the workspace config. Run setup again.\n")
@@ -1073,21 +1080,23 @@ async function setupOpenClaw(
     )
   const failed = agent ? await signInOpenClaw(paths, providers) : providers
   if (!agent) process.stderr.write("\nOpenClaw isn't on your PATH yet; this applies once it's installed.\n")
+  // The first sign-in run sets the model new sessions start on, as setup's own would, when the install names none.
+  const starter = failed.length > 0 && !OpenClaw.hasDefaultModel(paths)
   if (failed.length > 0)
     process.stderr.write(
       `\nSign OpenClaw in to OpenCode Console with:\n${failed
-        .flatMap((provider) => [
+        .flatMap((provider, index) => [
           ...(provider === "opencode"
-            ? [`  ${openclawInvocation(OpenClaw.pluginInstallCommand(provider))}   # if it isn't installed`]
+            ? [`  ${printed(OpenClaw.pluginInstallCommand(provider))}   # if it isn't installed`]
             : []),
-          `  ${openclawInvocation(OpenClaw.signInCommand(paths, provider, false).args)}`,
+          `  ${printed(OpenClaw.signInCommand(paths, provider, starter && index === 0).args)}`,
         ])
         .join(
           "\n",
-        )}\nOpenClaw before 2026.11.7 has no browser sign-in for OpenCode; it takes an API key instead: openclaw models auth paste-api-key --provider ${failed[0]}\n`,
+        )}\nOpenClaw before 2026.11.7 has no browser sign-in for OpenCode; it takes an API key instead: ${printed(["models", "auth", "paste-api-key", "--provider", ...failed.slice(0, 1)])}\n`,
     )
   process.stdout.write(
-    "\nOpenClaw loads plugins when its Gateway starts, so restart a running one with openclaw gateway restart.\n",
+    `\nOpenClaw loads plugins when its Gateway starts, so restart a running one with ${printed(["gateway", "restart"])}.\n`,
   )
   return 0
 }

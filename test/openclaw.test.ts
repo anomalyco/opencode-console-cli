@@ -1,5 +1,15 @@
 import { afterEach, expect, test } from "bun:test"
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs"
 import { createRequire } from "node:module"
 import os from "node:os"
 import path from "node:path"
@@ -333,6 +343,22 @@ test("enables the plugin beside the member's own, even one they had turned off o
   expect(read(path.join(plugin, "index.cjs"))).toContain(`const COMMAND = ${JSON.stringify(command)};`)
 })
 
+test("takes the plugin back off an allowlist setup added it to on --remove, and leaves one the member listed it on", async () => {
+  const added = member()
+  const listed = member()
+  const before = '{ "plugins": { "allow": ["mine"] } }\n'
+  write(added.paths.config, before)
+  write(listed.paths.config, '{ "plugins": { "allow": ["mine", "opencode-console"] } }\n')
+  await added.run()
+  await listed.run()
+
+  added.remove()
+  listed.remove()
+
+  expect(read(added.paths.config)).toBe(before)
+  expect(json(listed.paths.config).plugins.allow).toEqual(["mine", "opencode-console"])
+})
+
 test("writes a new openclaw.json readable only by the member, since it names their helper commands", async () => {
   const openclaw = member()
 
@@ -438,7 +464,8 @@ type ProviderHooks = Record<string, (ctx: unknown) => unknown>
 
 /**
  * Setup's plugin, loaded as OpenClaw loads it, against a stand-in for the CLI: a script that answers `hook openclaw`
- * with `hook` and `exit`, and `mcp-env` with `mcp`, recording what it was asked.
+ * with `hook` and `exit`, and `mcp-env` with `mcp` and the exit code in `mcp-exit` beside it, recording what it was
+ * asked.
  */
 async function plugin(answers: {
   hook?: string
@@ -458,7 +485,7 @@ async function plugin(answers: {
 printf '%s\\n' "$*" >> '${log}'
 case "$*" in
   *"hook openclaw"*) cat >> '${log}'; printf '%s' '${answers.hook ?? "{}"}'; exit ${answers.exit ?? 0} ;;
-  *"mcp-env"*) printf '%s' '${JSON.stringify({ env: answers.mcp ?? {}, version: "v" })}' ;;
+  *"mcp-env"*) printf '%s' '${JSON.stringify({ env: answers.mcp ?? {}, version: "v" })}'; exit $(cat '${path.join(openclaw.home, "mcp-exit")}' 2>/dev/null || echo 0) ;;
 esac
 `,
   )
@@ -507,6 +534,15 @@ test("lets an allowed tool call through and serves gateway MCP bearers from memo
   ])
 })
 
+test("fails an MCP bearer refresh the CLI can't answer, rather than hand back the bearer it replaces", async () => {
+  const served = await plugin({ mcp: { OPENCODE_CONSOLE_MCP_WEB_SEARCH_AUTHORIZATION: "Bearer ocgw_live" } })
+  const refresh = () => Promise.resolve(served.provider.refreshOAuth!({ refresh: "opencode-console:web_search" }))
+
+  expect(await refresh()).toMatchObject({ access: "ocgw_live" })
+  write(path.join(served.openclaw.home, "mcp-exit"), "1")
+  await expect(refresh()).rejects.toThrow("opencode-console couldn't refresh the MCP server web_search's token")
+})
+
 test("has the first tool call after OpenClaw creates AGENTS.md start a sync that writes the instructions", async () => {
   const waiting = await plugin({ instructions: [{ name: "Style", content: "Use tabs." }] })
   const call = () => waiting.hooks.before_tool_call!({ toolName: "read", params: { path: "a" } }, {})
@@ -516,6 +552,24 @@ test("has the first tool call after OpenClaw creates AGENTS.md start a sync that
   write(path.join(waiting.openclaw.paths.workspace, "AGENTS.md"), "OpenClaw's template.\n")
   await call()
   for (let tries = 0; tries < 100 && !waiting.log().includes("--refresh-agents"); tries++) await Bun.sleep(20)
+
+  expect(waiting.log()).toContain("sync --quiet --refresh-agents")
+})
+
+test("keeps the instructions waiting when their sync can't start, and starts it on a later tool call", async () => {
+  const waiting = await plugin({ instructions: [{ name: "Style", content: "Use tabs." }] })
+  const cli = path.join(waiting.openclaw.home, "cli.sh")
+  const call = () => waiting.hooks.before_tool_call!({ toolName: "read", params: { path: "a" } }, {})
+  write(path.join(waiting.openclaw.paths.workspace, "AGENTS.md"), "OpenClaw's template.\n")
+  renameSync(cli, `${cli}.moved`)
+
+  await call()
+  await Bun.sleep(50)
+  renameSync(`${cli}.moved`, cli)
+  for (let tries = 0; tries < 50 && !waiting.log().includes("--refresh-agents"); tries++) {
+    await call()
+    await Bun.sleep(20)
+  }
 
   expect(waiting.log()).toContain("sync --quiet --refresh-agents")
 })

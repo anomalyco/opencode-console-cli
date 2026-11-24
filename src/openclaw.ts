@@ -221,6 +221,8 @@ const Install = Schema.Struct({
     instructions: Schema.Boolean,
     loadPaths: Schema.Boolean,
     extraDirs: Schema.Boolean,
+    /** Whether setup added the plugin to the member's `plugins.allow`. */
+    allow: Schema.Boolean,
   }),
 })
 type Install = typeof Install.Type
@@ -350,6 +352,7 @@ export function remove(store: ConsoleStore.Info, config: string) {
   edit.delete(["plugins", "entries", PLUGIN])
   edit.without(["plugins", "load", "paths"], pluginDirectory(store, config), previous.created.loadPaths)
   edit.without(["skills", "load", "extraDirs"], skillsDirectory(store, config), previous.created.extraDirs)
+  if (previous.created.allow) edit.without(["plugins", "allow"], PLUGIN, false)
   const backup = ConsoleStore.read(SettingsFile.backupOf(previous.paths.config))
   // Setup's edits can leave whitespace that differs from what the member wrote; when only setup's edits are gone,
   // the file they wrote is put back as it was.
@@ -409,7 +412,9 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
   // consent, which a disabled entry would overrule. An allowlist the member keeps gets the plugin added to it.
   const loadPaths = edit.with(["plugins", "load", "paths"], plugin)
   edit.set(["plugins", "entries", PLUGIN], { enabled: true })
-  if (Array.isArray(valueAt(current, ["plugins", "allow"]))) edit.with(["plugins", "allow"], PLUGIN)
+  const allow = valueAt(current, ["plugins", "allow"])
+  const allowed = Array.isArray(allow) && !allow.some((item) => `${item}` === PLUGIN)
+  if (Array.isArray(allow)) edit.with(["plugins", "allow"], PLUGIN)
   if (Array.isArray(valueAt(current, ["plugins", "deny"]))) edit.without(["plugins", "deny"], PLUGIN, false)
   // Workspace skills, in setup's own folder, which OpenClaw scans after the workspace's and the install's own.
   const extraDirs = edit.with(["skills", "load", "extraDirs"], skills)
@@ -458,6 +463,7 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
       instructions: instructionsCreated,
       loadPaths: previous?.created.loadPaths ?? loadPaths,
       extraDirs: previous?.created.extraDirs ?? extraDirs,
+      allow: previous?.created.allow === true || allowed,
     },
   })
   ConsoleStore.write(
@@ -588,10 +594,16 @@ function mcpRead(answer) {
 // the first answer.
 function mcpFetch() {
   if (mcp.pending) return mcp.pending;
-  mcp.pending = run(["mcp-env"], undefined, 20_000).then((done) => {
-    if (done.code === 0) mcpRead(json(done.stdout));
-    mcp.pending = undefined;
-  });
+  // Says whether the CLI answered, so a refresh never hands back the bearer it was asked to replace.
+  mcp.pending = run(["mcp-env"], undefined, 20_000)
+    .then((done) => {
+      if (done.code !== 0) return false;
+      mcpRead(json(done.stdout));
+      return true;
+    })
+    .finally(() => {
+      mcp.pending = undefined;
+    });
   return mcp.pending;
 }
 function mcpEnv() {
@@ -652,7 +664,7 @@ module.exports = {
       },
       async refreshOAuth(credential) {
         const name = String(credential.refresh || "").replace(/^opencode-console:/, "");
-        await mcpFetch();
+        if (!(await mcpFetch())) throw new Error("opencode-console couldn't refresh the MCP server " + name + "'s token");
         const profile = SERVERS[name] && mcpProfile(name, mcp.env[SERVERS[name]]);
         if (!profile) throw new Error("OpenCode Console no longer offers the MCP server " + name);
         return profile.credential;
@@ -665,9 +677,21 @@ module.exports = {
     api.on("before_tool_call", async (event, ctx) => {
       if (!waited && WAITING && existsSync(WAITING)) {
         waited = true;
+        // A sync that can't start or fails leaves the instructions waiting, so the next tool call tries again. Node
+        // reports a command it can't start as an \`error\` event, which would end the Gateway if nothing handled it.
+        const retry = () => {
+          waited = false;
+        };
         try {
-          spawn(COMMAND[0], [...COMMAND.slice(1), ...harness, "sync", "--quiet", "--refresh-agents"], { env: env(), detached: true, stdio: "ignore", windowsHide: true }).unref();
-        } catch {}
+          const child = spawn(COMMAND[0], [...COMMAND.slice(1), ...harness, "sync", "--quiet", "--refresh-agents"], { env: env(), detached: true, stdio: "ignore", windowsHide: true });
+          child.on("error", retry);
+          child.on("exit", (code) => {
+            if (code !== 0) retry();
+          });
+          child.unref();
+        } catch {
+          retry();
+        }
       }
       const agentId = ctx.agentId || "main";
       const done = await run(
