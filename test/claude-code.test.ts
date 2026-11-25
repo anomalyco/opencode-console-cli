@@ -101,11 +101,23 @@ function member(input: {
       served.stats = stats
     },
     /** Setup, with `--keep-provider` when `keepProvider`, from a shell with `shell` as its environment. */
-    run: (options: { readonly keepProvider?: boolean; readonly shell?: Record<string, string> } = {}) =>
+    run: (
+      options: {
+        readonly keepProvider?: boolean
+        readonly shell?: Record<string, string>
+        readonly plan?: "auto" | "go" | "zen"
+      } = {},
+    ) =>
       synced(
         ClaudeCode.refresh(
           store,
-          { paths, command, harness: "claude-cli/2.1.318", keepProvider: options.keepProvider },
+          {
+            paths,
+            command,
+            harness: "claude-cli/2.1.318",
+            keepProvider: options.keepProvider,
+            ...(options.plan === undefined ? {} : { plan: options.plan }),
+          },
           options.shell ?? {},
         ),
       ),
@@ -332,6 +344,48 @@ test("points every alias at the first model when the workspace has no Claude mod
   })
 
   expect(models?.tiers).toEqual({ opus: "gpt-5.4", sonnet: "gpt-5.4", haiku: "gpt-5.4" })
+})
+
+test("keeps the aliases on the plan the member chose, so Go is not shadowed by a pay-as-you-go default", () => {
+  const document = {
+    opencode: { models: { "claude-sonnet-4-6": entry("claude-sonnet-4-6", { release_date: "2026-02-17" }) } },
+    "opencode-go": { models: { "glm-5": entry("glm-5", { release_date: "2026-03-01" }) } },
+  }
+
+  expect(ClaudeCode.models(document)?.tiers.sonnet).toBe("claude-sonnet-4-6")
+  expect(ClaudeCode.models(document, "zen")?.tiers.sonnet).toBe("claude-sonnet-4-6")
+  expect(ClaudeCode.models(document, "go")?.tiers).toEqual({
+    opus: "opencode-go/glm-5",
+    sonnet: "opencode-go/glm-5",
+    haiku: "opencode-go/glm-5",
+  })
+  // The picker still offers every model the one gateway serves.
+  expect(ClaudeCode.models(document, "go")?.options.map((option) => option.model)).toEqual([
+    "claude-sonnet-4-6",
+    "opencode-go/glm-5",
+  ])
+})
+
+test("setup --plan go writes Go aliases, and a later sync keeps them", async () => {
+  const claude = member({
+    models: {
+      opencode: { models: { "claude-sonnet-4-6": claudeSonnet } },
+      "opencode-go": { name: "OpenCode Go", models: { "glm-5": entry("glm-5") } },
+    },
+  })
+
+  await claude.run({ plan: "go" })
+
+  expect(json(claude.paths.settings).env).toMatchObject({
+    ANTHROPIC_DEFAULT_OPUS_MODEL: "opencode-go/glm-5",
+    ANTHROPIC_DEFAULT_SONNET_MODEL: "opencode-go/glm-5",
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: "opencode-go/glm-5",
+  })
+  expect(ClaudeCode.manifest(claude.store)?.plan).toBe("go")
+
+  await claude.sync()
+
+  expect(json(claude.paths.settings).env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("opencode-go/glm-5")
 })
 
 test("sends model requests to the gateway with the member's token, keeping the member's other settings", async () => {
