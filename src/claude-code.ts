@@ -50,6 +50,14 @@ export interface Model {
   readonly description?: string | undefined
 }
 
+/**
+ * Which provider's models the `opus`, `sonnet` and `haiku` aliases resolve to: `opencode` (OpenCode's own, billed
+ * pay-as-you-go), `opencode-go` (billed to the Go subscription), or `auto` for whichever ranks first.
+ */
+export type Plan = "auto" | "go" | "zen"
+
+const PLAN_PROVIDER: Record<Exclude<Plan, "auto">, string> = { go: "opencode-go", zen: "opencode" }
+
 /** The workspace's models as Claude Code uses them through the gateway. */
 export interface Models {
   /** The gateway's Anthropic base URL, for `ANTHROPIC_BASE_URL`. */
@@ -66,15 +74,19 @@ export interface Models {
  *
  * The `opus`, `sonnet` and `haiku` aliases each take the newest Claude model of their family from the first provider
  * that has one (OpenCode's models, then Go's, then the workspace's connections), else the nearest family, else the
- * first model listed, so every alias names a model the member may use.
+ * first model listed, so every alias names a model the member may use. `plan` keeps those aliases inside one provider,
+ * so a Go subscription is not shadowed by a pay-as-you-go default; the picker still offers every model the gateway
+ * serves.
  */
-export function models(document: ConsoleClient.ModelsDocument): Models | undefined {
+export function models(document: ConsoleClient.ModelsDocument, plan: Plan = "auto"): Models | undefined {
   const listed = WorkspaceModels.list(document)
   const root = WorkspaceModels.inferenceRoot(listed)
   if (listed.length === 0 || root === undefined) return undefined
   const gatewayID = (model: WorkspaceModels.Listed) =>
     model.provider === "opencode" ? model.id : `${model.provider}/${model.id}`
-  const tier = (...families: string[]) => gatewayID(WorkspaceModels.newest(listed, ...families)!)
+  const preferred = plan === "auto" ? listed : listed.filter((model) => model.provider === PLAN_PROVIDER[plan])
+  const pool = preferred.length > 0 ? preferred : listed
+  const tier = (...families: string[]) => gatewayID(WorkspaceModels.newest(pool, ...families)!)
   return {
     baseURL: `${root}/anthropic`,
     options: listed.map((model) => ({
@@ -127,6 +139,8 @@ const Manifest = Schema.Struct({
   /** A fingerprint of the config's providers, and the models setup made of them, reused while they're unchanged. */
   providers: Schema.optional(Schema.String),
   models: Schema.optional(Schema.NullOr(ModelsInfo)),
+  /** Which provider's models the aliases resolve to, from `setup --plan`; absent means `auto`. */
+  plan: Schema.optional(Schema.Literals(["auto", "go", "zen"])),
   /** Set by `setup --keep-provider`: Claude Code keeps its own sign-in and models, whatever the workspace serves. */
   keepProvider: Schema.optional(Schema.Boolean),
   /**
@@ -199,6 +213,7 @@ export const refresh = Effect.fn("ClaudeCode.refresh")(function* (
     readonly command: readonly string[]
     readonly harness?: string | undefined
     readonly keepProvider?: boolean | undefined
+    readonly plan?: Plan | undefined
   },
   shell: Readonly<Record<string, string | undefined>> = process.env,
 ) {
@@ -211,6 +226,7 @@ export const refresh = Effect.fn("ClaudeCode.refresh")(function* (
   const config = snapshot.config
   const skills = WorkspaceSnapshot.skills(snapshot)
   const keepProvider = setup ? setup.keepProvider === true : previous?.keepProvider === true
+  const plan: Plan = setup?.plan ?? previous?.plan ?? "auto"
   // A background sync reuses the models setup last made while the config's providers are unchanged.
   const providers = createHash("sha256")
     .update(JSON.stringify(config.providers ?? null))
@@ -220,7 +236,7 @@ export const refresh = Effect.fn("ClaudeCode.refresh")(function* (
     ? undefined
     : reused
       ? (previous.models ?? undefined)
-      : models(yield* ConsoleClient.fetchModels(credential))
+      : models(yield* ConsoleClient.fetchModels(credential), plan)
   const bundles = yield* Skill.fetchChanged(credential, base.paths.skills, skills, previous?.skills ?? {})
   return yield* ConsoleStore.locked(
     store,
@@ -241,6 +257,7 @@ export const refresh = Effect.fn("ClaudeCode.refresh")(function* (
         bundles,
         providers,
         keepProvider,
+        plan,
         stats: snapshot.stats,
         watches: WorkspaceSnapshot.watches(snapshot),
         shell,
@@ -322,6 +339,7 @@ interface Desired {
   readonly bundles: readonly Skill.Bundle[]
   readonly providers: string
   readonly keepProvider: boolean
+  readonly plan: Plan
   readonly stats: WorkspaceSnapshot.Stats | undefined
   readonly watches: boolean
   readonly shell: Readonly<Record<string, string | undefined>>
@@ -454,6 +472,7 @@ function apply(store: ConsoleStore.Info, desired: Desired): Applied {
         created,
         providers: desired.providers,
         models: desired.models ?? null,
+        plan: desired.plan,
         ...(desired.keepProvider ? { keepProvider: true } : {}),
         ...(usage === undefined ? {} : { usage }),
       }),

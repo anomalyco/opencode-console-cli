@@ -24,6 +24,7 @@ const parsed = parseArgs({
     quiet: { type: "boolean" },
     remove: { type: "boolean" },
     "keep-provider": { type: "boolean" },
+    plan: { type: "string" },
     profile: { type: "string" },
     listen: { type: "boolean" },
     "next-prompt": { type: "boolean" },
@@ -571,13 +572,23 @@ async function setup() {
   const target = parsed.positionals[1]
   if (!target || !AGENTS.includes(target)) {
     process.stderr.write(
-      `Usage: opencode-console setup <${AGENTS.join("|")}> [--keep-provider] [--profile <name>] [--remove]\n`,
+      `Usage: opencode-console setup <${AGENTS.join("|")}> [--keep-provider] [--plan go|auto|zen] [--profile <name>] [--remove]\n`,
     )
     return 1
   }
   const keepProvider = flags["keep-provider"] === true
   if (keepProvider && !VENDOR_SIGN_IN.includes(target)) {
     process.stderr.write("--keep-provider works with claude-code, codex, hermes and openclaw\n")
+    return 1
+  }
+  // Which plan's models Claude Code's aliases bill to; other agents take their model from their own config.
+  const plan = flag("plan")
+  if (plan !== undefined && plan !== "auto" && plan !== "go" && plan !== "zen") {
+    process.stderr.write("--plan takes auto, go or zen\n")
+    return 1
+  }
+  if (plan !== undefined && target !== "claude-code") {
+    process.stderr.write("--plan works with claude-code\n")
     return 1
   }
   const pi = target === "pi"
@@ -729,7 +740,7 @@ async function setup() {
   }
   return pi
     ? setupPi(store, command, synced.snapshot, agent)
-    : setupClaude(store, command, synced.snapshot, agent, keepProvider)
+    : setupClaude(store, command, synced.snapshot, agent, keepProvider, plan)
 }
 
 async function reportDsh(
@@ -770,6 +781,7 @@ async function setupClaude(
   snapshot: WorkspaceSnapshot.Info,
   claude: string | undefined,
   keepProvider: boolean,
+  plan: "auto" | "go" | "zen" | undefined,
 ) {
   const { ClaudeCode } = await import("./claude-code")
   const { WorkspaceSnapshot } = await import("./snapshot")
@@ -780,6 +792,7 @@ async function setupClaude(
       command,
       harness: claude ? `claude-cli/${claude}` : undefined,
       keepProvider,
+      ...(plan === undefined ? {} : { plan }),
     }),
   )
   if (!applied) {
